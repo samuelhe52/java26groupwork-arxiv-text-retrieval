@@ -27,5 +27,6 @@ These choices are locked for collaboration unless the team explicitly changes th
 - Build entrypoints: root `Makefile`, plus per-module `Makefile` files
 - Local dataset scripts default to repo-relative paths
 - Path overrides are available through environment variables
+- Indentation uses spaces; Java and Markdown use 4-space indents
 - No Docker or TypeScript in the initial scaffold
 - Use LF line endings for text files

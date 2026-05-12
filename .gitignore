@@ -23,10 +23,10 @@ Icon?
 *.user
 *.userossc
 *.sln.docstates
-.classpath
-.project
-.settings/
-.factorypath
+**/.classpath
+**/.project
+**/.settings/
+**/.factorypath
 
 # Java / Spring Boot / build outputs
 target/

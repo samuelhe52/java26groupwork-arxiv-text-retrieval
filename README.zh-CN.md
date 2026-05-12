@@ -45,6 +45,58 @@ TF-IDF 是 `词频 - 逆文档频率`。
 - `scripts/`：用于组装和清洗 arXiv 数据集的数据准备脚本
 - `Makefile`：顶层常用命令入口，包含后端、前端和数据归档任务
 
+## 后端环境变量
+
+后端支持两种 Hadoop 模式：
+
+- `local`：本地开发模式，不依赖集群
+- `cluster`：读取真实 Hadoop 客户端 XML 配置，并连接到 HDFS/YARN
+
+后端会按以下顺序寻找 Hadoop 配置目录：
+
+1. `HADOOP_CONF_DIR`
+2. `HADOOP_HOME/etc/hadoop`
+3. `${user.home}/hadoop/etc/hadoop`
+
+这样仓库本身就不需要写死某台机器的路径。无论是 macOS、Linux 还是 WSL，每个成员都可以通过自己的环境变量指向本机 Hadoop 配置目录。
+
+示例：
+
+```bash
+# macOS Orb
+export HADOOP_CONF_DIR=/Users/<your-name>/OrbStack/ubuntu/opt/hadoop-3.4.1/etc/hadoop
+
+# Linux 或 WSL
+export HADOOP_CONF_DIR=/opt/hadoop-3.4.1/etc/hadoop
+```
+
+## 本地开发
+
+平时开发后端时，默认使用 `local` 模式即可，不需要 HDFS、YARN，也不需要先启动集群。
+
+```bash
+make backend-run
+```
+
+在这个模式下，后端使用 `file:///`，适合先完成 Web/API 逻辑和本地联调。
+
+## 集群联调与生产测试
+
+当你需要连接真实 Hadoop 集群做联调或生产环境测试时，先设置 `HADOOP_CONF_DIR`，再以 `cluster` profile 启动后端：
+
+```bash
+cd backend
+HADOOP_CONF_DIR=/path/to/etc/hadoop ./mvnw -q spring-boot:run -Dspring-boot.run.profiles=cluster
+```
+
+在 `cluster` 模式下，后端会读取：
+
+- `core-site.xml`
+- `hdfs-site.xml`
+- 如果存在则读取 `yarn-site.xml`
+
+因此，当前活跃 NameNode 的发现、HDFS HA 行为以及 YARN HA 行为都交给集群自己的 Hadoop 客户端配置处理，而不是写死在应用代码里。
+
 ## 当前数据准备脚本
 
 - `scripts/assemble_arxiv_snapshot_dataset.py`：生成按年份组织的本地 arXiv `cs.LG` 数据集

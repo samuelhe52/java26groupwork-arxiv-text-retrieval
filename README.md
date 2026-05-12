@@ -45,6 +45,58 @@ In this project, TF-IDF is used to identify document keywords and to support ran
 - `scripts/`: data preparation helpers for assembling and cleaning arXiv-based datasets
 - `Makefile`: top-level shortcuts for backend, frontend, and dataset archive tasks
 
+## Backend Environment
+
+The backend supports two Hadoop modes:
+
+- `local`: no cluster required; uses the local filesystem for development
+- `cluster`: loads real Hadoop client XML config and connects to HDFS/YARN
+
+The backend resolves the Hadoop config directory in this order:
+
+1. `HADOOP_CONF_DIR`
+2. `HADOOP_HOME/etc/hadoop`
+3. `${user.home}/hadoop/etc/hadoop`
+
+This keeps the repo portable across macOS, Linux, and WSL. Each team member can point the backend at their own Hadoop installation without editing tracked files.
+
+Example environment setup:
+
+```bash
+# macOS Orb
+export HADOOP_CONF_DIR=/Users/<your-name>/OrbStack/ubuntu/opt/hadoop-3.4.1/etc/hadoop
+
+# Linux or WSL
+export HADOOP_CONF_DIR=/opt/hadoop-3.4.1/etc/hadoop
+```
+
+## Local Development
+
+For normal backend development, use the default `local` mode. This does not require HDFS, YARN, or a running cluster.
+
+```bash
+make backend-run
+```
+
+In this mode, the backend uses `file:///` and keeps the Hadoop integration path simple while the web/API code is still being built.
+
+## Cluster Testing
+
+When you want to test against a real Hadoop cluster, set `HADOOP_CONF_DIR` first and run the backend with the `cluster` Spring profile:
+
+```bash
+cd backend
+HADOOP_CONF_DIR=/path/to/etc/hadoop ./mvnw -q spring-boot:run -Dspring-boot.run.profiles=cluster
+```
+
+In `cluster` mode, the backend loads:
+
+- `core-site.xml`
+- `hdfs-site.xml`
+- `yarn-site.xml` if present
+
+That means active NameNode discovery, HDFS HA behavior, and YARN HA behavior come from the cluster's own Hadoop client config instead of being hardcoded in the application.
+
 ## Current Data Preparation Scripts
 
 - `scripts/assemble_arxiv_snapshot_dataset.py`: builds a local arXiv `cs.LG` dataset organized by year

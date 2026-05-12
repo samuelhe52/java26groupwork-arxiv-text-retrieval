@@ -6,11 +6,16 @@ end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-[*.{java,js,vue,ts,tsx,json,yml,yaml,md}]
+[*.{js,vue,ts,tsx,json,yml,yaml}]
 indent_style = space
 indent_size = 2
 
 [*.java]
+indent_style = space
+indent_size = 4
+
+[*.md]
+indent_style = space
 indent_size = 4
 
 [Makefile]
