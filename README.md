@@ -101,6 +101,7 @@ That means active NameNode discovery, HDFS HA behavior, and YARN HA behavior com
 
 - `scripts/assemble_arxiv_snapshot_dataset.py`: builds a local arXiv `cs.LG` dataset organized by year
 - `scripts/cleanup_arxiv_dataset_primary_cs.py`: derives a stricter primary-`cs.*` subset from the assembled dataset
+- `scripts/preflight_arxiv_dataset.py`: runs Python-only corpus checks, yearly keywords since 2019, and TF-IDF smoke tests before any Java or Hadoop work
 
 ## Common Commands
 
@@ -108,6 +109,7 @@ That means active NameNode discovery, HDFS HA behavior, and YARN HA behavior com
 make backend-build
 make backend-run
 make backend-test
+make dataset-preflight
 make frontend-install
 make frontend-dev
 make frontend-build

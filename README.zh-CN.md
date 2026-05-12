@@ -101,6 +101,7 @@ HADOOP_CONF_DIR=/path/to/etc/hadoop ./mvnw -q spring-boot:run -Dspring-boot.run.
 
 - `scripts/assemble_arxiv_snapshot_dataset.py`：生成按年份组织的本地 arXiv `cs.LG` 数据集
 - `scripts/cleanup_arxiv_dataset_primary_cs.py`：在已有数据集基础上进一步筛出 primary category 为 `cs.*` 的子集
+- `scripts/preflight_arxiv_dataset.py`：在进入 Java 或 Hadoop 之前，先做 Python 版语料检查、2019 年以来的年度关键词和 TF-IDF 烟雾测试
 
 ## 数据获取说明
 
@@ -112,6 +113,7 @@ HADOOP_CONF_DIR=/path/to/etc/hadoop ./mvnw -q spring-boot:run -Dspring-boot.run.
 make backend-build
 make backend-run
 make backend-test
+make dataset-preflight
 make frontend-install
 make frontend-dev
 make frontend-build
