@@ -1,0 +1,13 @@
+spring:
+  application:
+    name: final-assignment-backend
+
+server:
+  port: 8080
+
+app:
+  hadoop:
+    fs-uri: hdfs://localhost:8020
+    yarn-rm-address: localhost:8032
+    input-path: /datasets/input
+    output-path: /datasets/output
