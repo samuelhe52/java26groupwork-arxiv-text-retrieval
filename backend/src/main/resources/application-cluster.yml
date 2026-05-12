@@ -1,0 +1,4 @@
+app:
+  hadoop:
+    mode: cluster
+    config-dir: ${HADOOP_CONF_DIR:${HADOOP_HOME:${user.home}/hadoop}/etc/hadoop}

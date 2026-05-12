@@ -7,7 +7,8 @@ server:
 
 app:
   hadoop:
-    fs-uri: hdfs://localhost:8020
-    yarn-rm-address: localhost:8032
+    mode: local
+    local-base-path: ${user.home}/Desktop/hadoop/local-dev
+    config-dir: ${HADOOP_CONF_DIR:${HADOOP_HOME:${user.home}/hadoop}/etc/hadoop}
     input-path: /datasets/input
     output-path: /datasets/output

@@ -15,10 +15,11 @@ public class StatusController {
     }
 
     @GetMapping("/api/health")
-    public Map<String, String> health() {
+    public Map<String, Object> health() {
         return Map.of(
                 "status", "ok",
                 "backend", "spring-boot",
-                "processing", hadoopProcessingService.describe());
+                "processing", hadoopProcessingService.describe(),
+                "hadoop", hadoopProcessingService.describeConnection());
     }
 }
