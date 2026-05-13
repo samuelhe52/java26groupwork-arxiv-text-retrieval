@@ -1,4 +1,4 @@
-.PHONY: backend-build backend-run backend-test frontend-install frontend-dev frontend-build archive-primary archive-primary-only dataset-preflight clean
+.PHONY: backend-build backend-run backend-run-local backend-run-cluster backend-test frontend-install frontend-dev frontend-build archive-primary archive-primary-only dataset-preflight clean
 
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
@@ -12,8 +12,14 @@ backend-build:
 backend-run:
 	$(MAKE) -C $(BACKEND_DIR) run
 
+backend-run-local:
+	$(MAKE) -C $(BACKEND_DIR) run
+
 backend-test:
 	$(MAKE) -C $(BACKEND_DIR) test
+
+backend-run-cluster:
+	cd $(BACKEND_DIR) && HADOOP_CONF_DIR=$${HADOOP_CONF_DIR:?set HADOOP_CONF_DIR to your Hadoop conf dir} ./mvnw -q spring-boot:run -Dspring-boot.run.profiles=cluster
 
 frontend-install:
 	$(MAKE) -C $(FRONTEND_DIR) install

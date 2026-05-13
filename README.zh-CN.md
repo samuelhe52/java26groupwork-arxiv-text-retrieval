@@ -97,6 +97,18 @@ HADOOP_CONF_DIR=/path/to/etc/hadoop ./mvnw -q spring-boot:run -Dspring-boot.run.
 
 因此，当前活跃 NameNode 的发现、HDFS HA 行为以及 YARN HA 行为都交给集群自己的 Hadoop 客户端配置处理，而不是写死在应用代码里。
 
+## 模式切换
+
+- 本地开发：`make backend-run` 或 `make backend-run-local`
+- 集群模式：先设置 `HADOOP_CONF_DIR`，再运行 `make backend-run-cluster`
+
+示例：
+
+```bash
+export HADOOP_CONF_DIR=/opt/hadoop-3.4.1/etc/hadoop
+make backend-run-cluster
+```
+
 ## 当前数据准备脚本
 
 - `scripts/assemble_arxiv_snapshot_dataset.py`：生成按年份组织的本地 arXiv `cs.LG` 数据集

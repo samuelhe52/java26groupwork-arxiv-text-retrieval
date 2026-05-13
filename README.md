@@ -97,6 +97,18 @@ In `cluster` mode, the backend loads:
 
 That means active NameNode discovery, HDFS HA behavior, and YARN HA behavior come from the cluster's own Hadoop client config instead of being hardcoded in the application.
 
+## Switching Modes
+
+- Local development: `make backend-run` or `make backend-run-local`
+- Cluster mode: set `HADOOP_CONF_DIR` first, then run `make backend-run-cluster`
+
+Example:
+
+```bash
+export HADOOP_CONF_DIR=/opt/hadoop-3.4.1/etc/hadoop
+make backend-run-cluster
+```
+
 ## Current Data Preparation Scripts
 
 - `scripts/assemble_arxiv_snapshot_dataset.py`: builds a local arXiv `cs.LG` dataset organized by year
