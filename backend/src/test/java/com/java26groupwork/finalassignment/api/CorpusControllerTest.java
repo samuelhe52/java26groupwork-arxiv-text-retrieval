@@ -1,8 +1,12 @@
 package com.java26groupwork.finalassignment.api;
 
 import com.java26groupwork.finalassignment.corpus.CorpusIndexService;
+import com.java26groupwork.finalassignment.corpus.CorpusProperties;
+import com.java26groupwork.finalassignment.hadoop.HadoopProcessingService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -73,13 +77,56 @@ class CorpusControllerTest {
     @Test
     void analyzeEndpointRejectsMissingDataset() throws Exception {
         CorpusIndexService freshService = new CorpusIndexService(
-                new com.java26groupwork.finalassignment.corpus.CorpusProperties(),
-                new com.fasterxml.jackson.databind.ObjectMapper(),
-                org.mockito.Mockito.mock(com.java26groupwork.finalassignment.hadoop.HadoopProcessingService.class));
+                new CorpusProperties(),
+                new ObjectMapper(),
+                org.mockito.Mockito.mock(HadoopProcessingService.class));
 
         org.assertj.core.api.Assertions.assertThatThrownBy(freshService::requestReload)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Upload a dataset before submitting analysis.");
+    }
+
+    @Test
+    void analyzeUsesConfiguredDatasetWithoutAutoRunningAtStartup() {
+        CorpusProperties properties = new CorpusProperties();
+        ObjectMapper objectMapper = new ObjectMapper();
+        HadoopProcessingService processingService = org.mockito.Mockito.mock(HadoopProcessingService.class);
+        Path configuredDatasetDir = Path.of("/configured/corpus/years");
+
+        org.mockito.Mockito.when(processingService.configuredDatasetDir()).thenReturn(configuredDatasetDir);
+        org.mockito.Mockito.when(processingService.processDataset(
+                        org.mockito.ArgumentMatchers.eq(configuredDatasetDir),
+                        org.mockito.ArgumentMatchers.same(properties)))
+                .thenReturn(new HadoopProcessingService.ProcessingArtifacts(
+                        configuredDatasetDir,
+                        new org.apache.hadoop.fs.Path("file:/tmp/work"),
+                        new org.apache.hadoop.fs.Path("file:/tmp/input"),
+                        new org.apache.hadoop.fs.Path("file:/tmp/tf"),
+                        new org.apache.hadoop.fs.Path("file:/tmp/df"),
+                        new org.apache.hadoop.fs.Path("file:/tmp/tfidf"),
+                        new org.apache.hadoop.fs.Path("file:/tmp/keywords"),
+                        new org.apache.hadoop.fs.Path("file:/tmp/index"),
+                        Instant.now(),
+                        0L,
+                        0,
+                        List.of()));
+
+        CorpusIndexService freshService = new CorpusIndexService(properties, objectMapper, processingService);
+        try {
+            org.assertj.core.api.Assertions.assertThat(freshService.buildSummary().getStatus()).isEqualTo("not-analyzed");
+            org.assertj.core.api.Assertions.assertThat(freshService.buildSummary().getDatasetDir())
+                    .isEqualTo(configuredDatasetDir.toString());
+            org.mockito.Mockito.verify(processingService, org.mockito.Mockito.never())
+                    .processDataset(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+
+            org.assertj.core.api.Assertions.assertThatCode(freshService::requestReload).doesNotThrowAnyException();
+            org.mockito.Mockito.verify(processingService, org.mockito.Mockito.timeout(1000))
+                    .processDataset(
+                            org.mockito.ArgumentMatchers.eq(configuredDatasetDir),
+                            org.mockito.ArgumentMatchers.same(properties));
+        } finally {
+            freshService.destroy();
+        }
     }
 
     @Test
@@ -134,6 +181,21 @@ class CorpusControllerTest {
                 "broken.json",
                 "application/json",
                 "{\"papers\": [".getBytes());
+
+        mockMvc.perform(multipart("/api/corpus/upload").file(file))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("Unexpected end-of-input")));
+    }
+
+    @Test
+    void uploadEndpointReturnsBadRequestForMalformedJsonLines() throws Exception {
+        MockMultipartFile file = new MockMultipartFile(
+                "files",
+                "broken.jsonl",
+                "application/json",
+                "{\"id\":\"2603.00001\",\"title\":\"Broken\",\"abstract\":\"Missing brace\"".getBytes());
 
         mockMvc.perform(multipart("/api/corpus/upload").file(file))
                 .andExpect(status().isBadRequest())

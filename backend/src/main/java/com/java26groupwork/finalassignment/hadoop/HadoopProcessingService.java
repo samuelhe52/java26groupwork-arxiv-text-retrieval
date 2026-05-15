@@ -143,6 +143,14 @@ public class HadoopProcessingService {
         return FileSystem.get(new org.apache.hadoop.conf.Configuration(hadoopConfiguration));
     }
 
+    public Path configuredDatasetDir() {
+        String configuredInputPath = properties.getInputPath();
+        if (configuredInputPath == null || configuredInputPath.isBlank()) {
+            return null;
+        }
+        return Path.of(configuredInputPath).normalize();
+    }
+
     private WorkPaths createWorkPaths(Path sourceDatasetDir) {
         String runId = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(java.time.LocalDateTime.now());
         if (properties.getMode() == HadoopProperties.Mode.LOCAL) {
@@ -181,10 +189,19 @@ public class HadoopProcessingService {
         if (Files.isDirectory(yearsDir)) {
             return stageLocalDataset(yearsDir, fileSystem, inputDirectory);
         }
+        if (Files.isDirectory(sourceDatasetDir) && containsJsonlShards(sourceDatasetDir)) {
+            return stageLocalDataset(sourceDatasetDir, fileSystem, inputDirectory);
+        }
         if (properties.getMode() == HadoopProperties.Mode.CLUSTER) {
             return stageClusterDataset(fileSystem, inputDirectory);
         }
         throw new IllegalArgumentException("Dataset years directory does not exist: " + yearsDir);
+    }
+
+    private boolean containsJsonlShards(Path directory) throws IOException {
+        try (var stream = Files.list(directory)) {
+            return stream.anyMatch(path -> path.getFileName().toString().endsWith(".jsonl"));
+        }
     }
 
     private StageResult stageLocalDataset(

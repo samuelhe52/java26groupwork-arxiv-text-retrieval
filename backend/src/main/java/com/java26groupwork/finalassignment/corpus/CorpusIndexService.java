@@ -67,8 +67,11 @@ public class CorpusIndexService {
             thread.setDaemon(true);
             return thread;
         });
-        this.activeDatasetDir = null;
-        this.snapshot = CorpusIndexSnapshot.empty("", "not-analyzed", List.of());
+        this.activeDatasetDir = resolveConfiguredDatasetDir();
+        this.snapshot = CorpusIndexSnapshot.empty(
+                activeDatasetDir == null ? "" : activeDatasetDir.toString(),
+                "not-analyzed",
+                List.of());
     }
 
     public synchronized CorpusResponses.CorpusBuildSummary reload() {
@@ -532,9 +535,12 @@ public class CorpusIndexService {
             CorpusIndexSnapshot current, String status, String extraWarning) {
         ArrayList<String> warnings = new ArrayList<>(current.buildSummary.getWarnings());
         warnings.add(extraWarning);
+        String datasetDir = activeDatasetDir == null
+                ? current.buildSummary.getDatasetDir()
+                : activeDatasetDir.toString();
         return new CorpusResponses.CorpusBuildSummary(
                 status,
-                activeDatasetDir.toString(),
+                datasetDir,
                 reloadRequestedAt != null ? reloadRequestedAt : current.buildSummary.getBuiltAt(),
                 current.buildSummary.getBuildMillis(),
                 current.recordCount(),
@@ -726,14 +732,24 @@ public class CorpusIndexService {
     }
 
     private Path requireActiveDatasetDir() {
-        if (activeDatasetDir == null) {
+        if (activeDatasetDir != null) {
+            return activeDatasetDir;
+        }
+
+        Path configuredDatasetDir = resolveConfiguredDatasetDir();
+        if (configuredDatasetDir == null) {
             throw new IllegalArgumentException("Upload a dataset before submitting analysis.");
         }
-        return activeDatasetDir;
+        activeDatasetDir = configuredDatasetDir;
+        return configuredDatasetDir;
     }
 
     private Path resolvePath(String value) {
         return Path.of(value).normalize().toAbsolutePath();
+    }
+
+    private Path resolveConfiguredDatasetDir() {
+        return hadoopProcessingService.configuredDatasetDir();
     }
 
     private Path createUploadDatasetDir() {
@@ -875,24 +891,36 @@ public class CorpusIndexService {
         try {
             return objectMapper.readTree(line);
         } catch (IOException exception) {
-            throw new UncheckedIOException("Failed to parse uploaded JSONL in " + filename, exception);
+            String safeFilename = (filename == null || filename.isBlank()) ? "upload.jsonl" : filename;
+            String parserMessage = extractUploadParserMessage(exception);
+            String message = parserMessage == null
+                    ? "Failed to parse uploaded JSONL in " + safeFilename + "."
+                    : "Uploaded JSON is malformed in " + safeFilename + ": " + parserMessage;
+            throw new UncheckedIOException(message, exception);
         }
     }
 
     private String describeUploadImportFailure(IOException exception) {
+        String parserMessage = extractUploadParserMessage(exception);
+        if (parserMessage != null) {
+            return "Uploaded JSON is malformed: " + parserMessage;
+        }
+        return "Failed to persist uploaded dataset.";
+    }
+
+    private String extractUploadParserMessage(IOException exception) {
         Throwable current = exception;
         while (current != null) {
             if (current instanceof JsonProcessingException) {
                 String parserMessage = current.getMessage();
                 if (parserMessage == null || parserMessage.isBlank()) {
-                    return "Uploaded JSON is malformed.";
+                    return null;
                 }
-                String firstLine = parserMessage.lines().findFirst().orElse(parserMessage).trim();
-                return "Uploaded JSON is malformed: " + firstLine;
+                return parserMessage.lines().findFirst().orElse(parserMessage).trim();
             }
             current = current.getCause();
         }
-        return "Failed to persist uploaded dataset.";
+        return null;
     }
 
     private boolean writeUploadedRecord(JsonNode rawNode, UploadWriters writers, List<String> warnings)
