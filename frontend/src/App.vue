@@ -81,7 +81,7 @@
           <p class="section-label">Dataset Import</p>
           <p class="upload-hint">
             Choose one or more `.json` or `.jsonl` files, upload them to stage the dataset, then
-            run analysis explicitly.
+            run analysis explicitly. The current upload limit is 1 GB per request.
           </p>
         </div>
         <input

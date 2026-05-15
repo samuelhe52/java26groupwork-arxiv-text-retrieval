@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.web.servlet.MultipartProperties;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -15,6 +16,7 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -135,7 +137,24 @@ class CorpusControllerTest {
 
         mockMvc.perform(multipart("/api/corpus/upload").file(file))
                 .andExpect(status().isBadRequest())
-                .andExpect(status().reason(org.hamcrest.Matchers.containsString("Unexpected end-of-input")));
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("Unexpected end-of-input")));
+    }
+
+    @Test
+    void uploadSizeExceededReturnsPayloadTooLargeMessage() {
+        MultipartProperties multipartProperties = new MultipartProperties();
+        multipartProperties.setMaxRequestSize(org.springframework.util.unit.DataSize.ofGigabytes(1));
+        ApiExceptionHandler handler = new ApiExceptionHandler(multipartProperties);
+
+        var response = handler.handleMaxUploadSizeExceeded(new MaxUploadSizeExceededException(1024));
+
+        org.assertj.core.api.Assertions.assertThat(response.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.PAYLOAD_TOO_LARGE);
+        org.assertj.core.api.Assertions.assertThat(response.getBody()).isNotNull();
+        org.assertj.core.api.Assertions.assertThat(response.getBody().message())
+                .contains("1 GB")
+                .contains("Split the dataset");
     }
 
     @Test
