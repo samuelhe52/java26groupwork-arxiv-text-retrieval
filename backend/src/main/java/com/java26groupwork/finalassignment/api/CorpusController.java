@@ -43,15 +43,6 @@ public class CorpusController {
         return corpusIndexService.documentById(id);
     }
 
-    @PostMapping("/corpus/reload")
-    public CorpusResponses.CorpusBuildSummary reload() {
-        try {
-            return corpusIndexService.requestReload();
-        } catch (IllegalArgumentException exception) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, exception.getMessage(), exception);
-        }
-    }
-
     @PostMapping("/corpus/analyze")
     public CorpusResponses.CorpusBuildSummary analyze() {
         try {

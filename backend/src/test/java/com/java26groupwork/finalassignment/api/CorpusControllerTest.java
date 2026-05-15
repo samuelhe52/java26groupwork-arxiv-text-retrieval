@@ -69,13 +69,6 @@ class CorpusControllerTest {
     }
 
     @Test
-    void reloadEndpointStartsBackgroundRebuild() throws Exception {
-        mockMvc.perform(post("/api/corpus/reload"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("reloading"));
-    }
-
-    @Test
     void analyzeEndpointRejectsMissingDataset() throws Exception {
         CorpusIndexService freshService = new CorpusIndexService(
                 new com.java26groupwork.finalassignment.corpus.CorpusProperties(),
