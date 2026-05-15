@@ -11,8 +11,6 @@ server:
 
 app:
   corpus:
-    dataset-dir: ../datasets/arxiv-cs-lg-2015-now-primary-cs-only
-    auto-load: true
     document-keyword-count: 8
     year-keyword-since: 2015
     year-keyword-count: 10

@@ -66,14 +66,15 @@ public class CorpusIndexService {
             thread.setDaemon(true);
             return thread;
         });
-        this.activeDatasetDir = resolvePath(properties.getDatasetDir());
-        this.snapshot = CorpusIndexSnapshot.empty(activeDatasetDir.toString(), "not-analyzed", List.of());
+        this.activeDatasetDir = null;
+        this.snapshot = CorpusIndexSnapshot.empty("", "not-analyzed", List.of());
     }
 
     public synchronized CorpusResponses.CorpusBuildSummary reload() {
+        Path datasetDir = requireActiveDatasetDir();
         try {
             HadoopProcessingService.ProcessingArtifacts artifacts =
-                    hadoopProcessingService.processDataset(activeDatasetDir, properties);
+                    hadoopProcessingService.processDataset(datasetDir, properties);
             this.snapshot = buildSnapshot(artifacts);
             this.lastReloadError = null;
             return snapshot.buildSummary;
@@ -87,6 +88,7 @@ public class CorpusIndexService {
         if (reloadInProgress) {
             return buildSummary();
         }
+        requireActiveDatasetDir();
 
         reloadInProgress = true;
         reloadRequestedAt = Instant.now();
@@ -158,11 +160,6 @@ public class CorpusIndexService {
                 List.copyOf(uploadedFiles),
                 limitWarnings(warnings),
                 build);
-    }
-
-    public synchronized CorpusResponses.CorpusBuildSummary restoreConfiguredDataset() {
-        activeDatasetDir = resolvePath(properties.getDatasetDir());
-        return reload();
     }
 
     @PreDestroy
@@ -725,6 +722,13 @@ public class CorpusIndexService {
             snippet = snippet + "...";
         }
         return snippet;
+    }
+
+    private Path requireActiveDatasetDir() {
+        if (activeDatasetDir == null) {
+            throw new IllegalArgumentException("Upload a dataset before submitting analysis.");
+        }
+        return activeDatasetDir;
     }
 
     private Path resolvePath(String value) {

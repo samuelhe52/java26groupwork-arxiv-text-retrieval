@@ -419,7 +419,7 @@ const buildStatusText = computed(() => {
     return 'Dataset upload is staged. Submit analysis to build the Hadoop index.';
   }
   if (build.status === 'not-analyzed') {
-    return 'No analysis has run yet. Upload a dataset or analyze the configured dataset.';
+    return 'No analysis has run yet. Upload a dataset and then submit analysis.';
   }
   if (build.status === 'reloading') {
     return 'Background analysis is running through the Hadoop/MapReduce pipeline.';
