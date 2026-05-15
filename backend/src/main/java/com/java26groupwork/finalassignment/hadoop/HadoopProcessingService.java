@@ -19,7 +19,6 @@ import java.util.List;
 import java.util.Set;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.mapreduce.Job;
 import org.springframework.stereotype.Service;
 
@@ -31,9 +30,6 @@ import com.java26groupwork.finalassignment.hadoop.jobs.TfIdfJob;
 
 @Service
 public class HadoopProcessingService {
-
-    private static final PathFilter PART_FILE_FILTER =
-            path -> path.getName().startsWith("part-");
 
     private final HadoopProperties properties;
     private final org.apache.hadoop.conf.Configuration hadoopConfiguration;
@@ -145,18 +141,6 @@ public class HadoopProcessingService {
 
     public FileSystem fileSystem() throws IOException {
         return FileSystem.get(new org.apache.hadoop.conf.Configuration(hadoopConfiguration));
-    }
-
-    public List<org.apache.hadoop.fs.Path> outputPartFiles(org.apache.hadoop.fs.Path directory) throws IOException {
-        FileStatus[] statuses = fileSystem().listStatus(directory, PART_FILE_FILTER);
-        ArrayList<org.apache.hadoop.fs.Path> partFiles = new ArrayList<>(statuses.length);
-        for (FileStatus status : statuses) {
-            if (status.isFile()) {
-                partFiles.add(status.getPath());
-            }
-        }
-        partFiles.sort(java.util.Comparator.comparing(org.apache.hadoop.fs.Path::toString));
-        return List.copyOf(partFiles);
     }
 
     private WorkPaths createWorkPaths(Path sourceDatasetDir) {
