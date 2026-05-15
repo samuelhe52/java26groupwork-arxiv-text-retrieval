@@ -1,0 +1,27 @@
+{
+  "fields": [
+    "id",
+    "year",
+    "month",
+    "authors",
+    "title",
+    "abstract",
+    "categories",
+    "categories_list",
+    "primary_category",
+    "update_date"
+  ],
+  "years": [
+    {
+      "year": 2024,
+      "records": 2
+    },
+    {
+      "year": 2025,
+      "records": 1
+    }
+  ],
+  "totals": {
+    "records": 3
+  }
+}

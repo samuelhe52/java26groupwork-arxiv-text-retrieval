@@ -1,14 +1,28 @@
 spring:
   application:
     name: final-assignment-backend
+  servlet:
+    multipart:
+      max-file-size: 256MB
+      max-request-size: 256MB
 
 server:
   port: 8080
 
 app:
+  corpus:
+    dataset-dir: ../datasets/arxiv-cs-lg-2015-now-primary-cs-only
+    auto-load: true
+    document-keyword-count: 8
+    year-keyword-since: 2015
+    year-keyword-count: 10
+    year-keyword-min-count: 40
+    search-default-limit: 20
+    search-max-limit: 50
+    index-max-document-frequency-ratio: 0.20
   hadoop:
     mode: local
     local-base-path: ${user.home}/Desktop/hadoop/local-dev
     config-dir: ${HADOOP_CONF_DIR:${HADOOP_HOME:${user.home}/hadoop}/etc/hadoop}
-    input-path: /datasets/input
+    input-path: /datasets/arxiv-cs-lg-2015-now-primary-cs-only/years
     output-path: /datasets/output

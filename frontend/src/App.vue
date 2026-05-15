@@ -1,43 +1,686 @@
 <template>
-  <main class="shell">
-    <section class="hero">
-      <p class="eyebrow">Final Assignment</p>
-      <h1>Vue 3 web UI scaffold</h1>
-      <p class="lede">
-        This interface will sit on top of the Spring Boot backend and the Hadoop processing module.
-      </p>
-      <div class="status">{{ statusText }}</div>
+  <main class="page-shell">
+    <section class="hero-panel">
+      <div class="hero-copy">
+        <p class="eyebrow">Hadoop Text Retrieval</p>
+        <h1>Search arXiv abstracts through a local-first TF-IDF pipeline.</h1>
+        <p class="hero-lede">
+          The Spring Boot backend keeps a searchable local TF-IDF index over the JSONL corpus and
+          exposes yearly term signals for quick corpus inspection.
+        </p>
+      </div>
+
+      <div class="hero-status">
+        <div class="status-badge" :class="overview?.ready ? 'is-ready' : 'is-waiting'">
+          <span class="status-dot"></span>
+          <span>{{ overview?.ready ? 'Local index ready' : 'Waiting for corpus' }}</span>
+        </div>
+        <p class="status-line">
+          {{ healthText }}
+        </p>
+        <p class="status-line subtle">
+          {{ buildStatusText }}
+        </p>
+        <button class="ghost-button" :disabled="reloadPending" @click="reloadIndex">
+          {{ reloadPending ? 'Reloading index...' : 'Reload Local Index' }}
+        </button>
+      </div>
     </section>
 
-    <section class="grid">
-      <article class="card">
-        <h2>Frontend</h2>
-        <p>Vue 3 and Vite for search, upload, and result views.</p>
+    <section class="search-panel">
+      <div class="search-heading">
+        <p class="section-label">Retrieval Console</p>
+        <h2>Query the corpus</h2>
+      </div>
+
+      <div v-if="uiError" class="error-strip">
+        {{ uiError }}
+      </div>
+
+      <form class="search-form" @submit.prevent="runSearch">
+        <label class="field field-query">
+          <span>Query</span>
+          <input
+            v-model="query"
+            type="text"
+            placeholder="graph neural network, federated learning, diffusion planning..."
+          />
+        </label>
+
+        <label class="field">
+          <span>Year</span>
+          <select v-model="selectedYear">
+            <option value="">All years</option>
+            <option v-for="year in yearOptions" :key="year" :value="String(year)">
+              {{ year }}
+            </option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Category</span>
+          <select v-model="selectedCategory">
+            <option value="">All categories</option>
+            <option
+              v-for="category in categoryOptions"
+              :key="category.name"
+              :value="category.name"
+            >
+              {{ category.name }}
+            </option>
+          </select>
+        </label>
+
+        <button class="primary-button" :disabled="searchPending">
+          {{ searchPending ? 'Searching...' : 'Run Search' }}
+        </button>
+      </form>
+
+      <div class="upload-panel">
+        <div class="upload-copy">
+          <p class="section-label">Dataset Import</p>
+          <p class="upload-hint">
+            Choose one or more `.json` or `.jsonl` files, then rebuild the local index.
+          </p>
+        </div>
+        <input
+          ref="uploadInput"
+          class="sr-only"
+          type="file"
+          accept=".json,.jsonl,application/json"
+          multiple
+          @change="handleUploadSelection"
+        />
+        <input
+          ref="uploadFolderInput"
+          class="sr-only"
+          type="file"
+          multiple
+          webkitdirectory
+          directory
+          @change="handleUploadSelection"
+        />
+        <div class="upload-actions">
+          <button type="button" class="secondary-button" @click="openUploadPicker">
+            Choose files
+          </button>
+          <button type="button" class="secondary-button" @click="openUploadFolderPicker">
+            Choose folder
+          </button>
+          <button
+            type="button"
+            class="primary-button"
+            :disabled="uploadPending || !selectedUploadFiles.length"
+            @click="uploadCorpus"
+          >
+            {{ uploadPending ? 'Uploading...' : 'Upload dataset' }}
+          </button>
+        </div>
+        <p class="upload-meta">
+          {{ selectedUploadFiles.length ? uploadSelectionText : 'No files selected.' }}
+        </p>
+        <div v-if="selectedUploadFiles.length" class="keyword-chip-row">
+          <span
+            v-for="file in selectedUploadFiles"
+            :key="uploadFileKey(file)"
+            class="keyword-chip secondary"
+          >
+            {{ uploadFileLabel(file) }}
+          </span>
+        </div>
+      </div>
+
+      <div v-if="uploadResult" class="success-strip">
+        {{ uploadResult }}
+      </div>
+
+      <div v-if="uploadWarnings.length" class="warning-strip">
+        <span v-for="warning in uploadWarnings" :key="warning">{{ warning }}</span>
+      </div>
+
+      <div v-if="searchWarnings.length" class="warning-strip">
+        <span v-for="warning in searchWarnings" :key="warning">{{ warning }}</span>
+      </div>
+    </section>
+
+    <section class="metrics-grid">
+      <article v-for="card in summaryCards" :key="card.label" class="metric-card">
+        <p class="metric-label">{{ card.label }}</p>
+        <p class="metric-value">{{ card.value }}</p>
+        <p class="metric-detail">{{ card.detail }}</p>
       </article>
-      <article class="card">
-        <h2>Backend</h2>
-        <p>Spring Boot API layer with a placeholder health route.</p>
+    </section>
+
+    <section class="content-grid">
+      <article class="panel overview-panel full-span">
+        <div class="panel-head">
+          <div>
+            <p class="section-label">Corpus Overview</p>
+            <h2>Year distribution</h2>
+          </div>
+          <p class="panel-meta">{{ formatNumber(totalDocuments) }} docs</p>
+        </div>
+
+        <div v-if="overview?.years?.length" class="year-list">
+          <div v-for="year in overview.years" :key="year.year" class="year-row">
+            <div class="year-row-head">
+              <span class="year-label">{{ year.year }}</span>
+              <span class="year-count">{{ formatNumber(year.recordCount) }}</span>
+            </div>
+            <div class="bar-track">
+              <div class="bar-fill" :style="{ width: yearWidth(year.recordCount) }"></div>
+            </div>
+            <div v-if="year.keywords?.length" class="keyword-chip-row">
+              <span
+                v-for="keyword in year.keywords"
+                :key="`${year.year}-${keyword.term}`"
+                class="keyword-chip"
+              >
+                {{ keyword.term }} ({{ keyword.score.toFixed(2) }})
+              </span>
+            </div>
+            <p v-else class="year-keyword-empty">No distinctive yearly keywords.</p>
+          </div>
+        </div>
       </article>
-      <article class="card">
-        <h2>Hadoop</h2>
-        <p>Reserved for HDFS and YARN orchestration and job execution.</p>
+    </section>
+
+    <section class="content-grid results-grid">
+      <article class="panel results-panel">
+        <div class="panel-head">
+          <div class="panel-title-block">
+            <p class="section-label">Results</p>
+            <h2>Ranked hits</h2>
+            <p class="panel-caption">{{ resultsQueryText }}</p>
+          </div>
+          <p class="panel-meta">
+            {{ searchResponse ? `${formatNumber(searchResponse.totalHits)} hits` : 'No search yet' }}
+          </p>
+        </div>
+
+        <div v-if="searchPending" class="empty-state">Searching the corpus...</div>
+        <div v-else-if="!searchResults.length" class="empty-state">
+          Run a query to inspect ranked search results and document keywords.
+        </div>
+        <div v-else class="results-shell">
+          <div class="scroll-progress">
+            <div class="progress-copy">
+              <span>{{ resultsCoverageText }}</span>
+              <span>{{ Math.round(resultsScrollProgress) }}%</span>
+            </div>
+            <div class="progress-bar" aria-hidden="true">
+              <div
+                class="progress-bar-fill"
+                :style="{ width: `${Math.max(resultsScrollProgress, 6)}%` }"
+              ></div>
+            </div>
+          </div>
+          <div ref="resultsScroller" class="results-scroll" @scroll="updateResultsScrollProgress">
+            <button
+              v-for="result in searchResults"
+              :key="result.id"
+              type="button"
+              class="result-card"
+              :class="{ active: selectedDocument?.document?.id === result.id }"
+              @click="loadDocument(result.id)"
+            >
+              <div class="result-header">
+                <span class="result-year">{{ result.year }}</span>
+                <span class="result-score">score {{ result.score.toFixed(3) }}</span>
+              </div>
+              <h3>{{ result.title }}</h3>
+              <p class="result-snippet">{{ result.abstractSnippet }}</p>
+              <div class="result-meta">
+                <span>{{ result.primaryCategory }}</span>
+                <span>{{ result.authors || 'Unknown authors' }}</span>
+              </div>
+              <div class="keyword-chip-row">
+                <span
+                  v-for="term in result.matchedTerms"
+                  :key="`${result.id}-${term}`"
+                  class="keyword-chip match"
+                >
+                  {{ term }}
+                </span>
+                <span
+                  v-for="keyword in result.keywords.slice(0, 4)"
+                  :key="`${result.id}-${keyword.term}`"
+                  class="keyword-chip secondary"
+                >
+                  {{ keyword.term }}
+                </span>
+              </div>
+            </button>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel detail-panel">
+        <div class="panel-head">
+          <div class="panel-title-block">
+            <p class="section-label">Document Detail</p>
+            <h2>{{ selectedDocument?.document?.title ?? 'Select a result' }}</h2>
+            <p class="panel-caption">{{ detailSummaryText }}</p>
+          </div>
+          <p class="panel-meta">{{ detailPending ? 'Loading...' : selectedDocument?.status ?? 'idle' }}</p>
+        </div>
+
+        <div v-if="detailPending" class="empty-state">Loading document detail...</div>
+        <div v-else-if="!selectedDocument?.ready" class="empty-state">
+          Pick a result to inspect the stored document fields and extracted keywords.
+        </div>
+        <div v-else class="detail-scroll">
+          <div class="detail-body">
+            <div class="detail-meta-grid">
+              <div>
+                <span class="detail-label">arXiv ID</span>
+                <p>{{ selectedDocument.document.id }}</p>
+              </div>
+              <div>
+                <span class="detail-label">Year / Month</span>
+                <p>{{ selectedDocument.document.year }} / {{ selectedDocument.document.month }}</p>
+              </div>
+              <div>
+                <span class="detail-label">Primary category</span>
+                <p>{{ selectedDocument.document.primaryCategory }}</p>
+              </div>
+              <div>
+                <span class="detail-label">Updated</span>
+                <p>{{ selectedDocument.document.updateDate || 'n/a' }}</p>
+              </div>
+            </div>
+
+            <div class="detail-section">
+              <span class="detail-label">Authors</span>
+              <p>{{ selectedDocument.document.authors || 'Unknown authors' }}</p>
+            </div>
+
+            <div class="detail-section">
+              <span class="detail-label">Categories</span>
+              <div class="keyword-chip-row">
+                <span
+                  v-for="category in selectedDocument.document.categories"
+                  :key="category"
+                  class="keyword-chip secondary"
+                >
+                  {{ category }}
+                </span>
+              </div>
+            </div>
+
+            <div class="detail-section">
+              <span class="detail-label">Abstract</span>
+              <p class="detail-abstract">{{ selectedDocument.document.abstractText }}</p>
+            </div>
+
+            <div class="detail-section">
+              <span class="detail-label">Extracted keywords</span>
+              <div class="keyword-chip-row">
+                <span
+                  v-for="keyword in selectedDocument.keywords"
+                  :key="`${selectedDocument.document.id}-${keyword.term}`"
+                  class="keyword-chip"
+                >
+                  {{ keyword.term }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
       </article>
     </section>
   </main>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 
-const statusText = ref('Backend status: checking...');
+const query = ref('graph neural network');
+const selectedYear = ref('');
+const selectedCategory = ref('');
+
+const overview = ref(null);
+const health = ref(null);
+const searchResponse = ref(null);
+const selectedDocument = ref(null);
+const resultsScroller = ref(null);
+const uploadInput = ref(null);
+const uploadFolderInput = ref(null);
+
+const searchPending = ref(false);
+const detailPending = ref(false);
+const reloadPending = ref(false);
+const uploadPending = ref(false);
+const uiError = ref('');
+const resultsScrollProgress = ref(0);
+const selectedUploadFiles = ref([]);
+const uploadResult = ref('');
+const uploadWarnings = ref([]);
+
+const yearOptions = computed(() =>
+  (overview.value?.years ?? []).map((entry) => entry.year).sort((left, right) => right - left),
+);
+
+const categoryOptions = computed(() => overview.value?.topCategories ?? []);
+
+const totalDocuments = computed(() => overview.value?.recordCount ?? 0);
+
+const maxYearCount = computed(() =>
+  Math.max(...(overview.value?.years ?? []).map((entry) => entry.recordCount), 1),
+);
+
+const searchResults = computed(() => searchResponse.value?.results ?? []);
+
+const searchWarnings = computed(() => searchResponse.value?.warnings ?? []);
+
+const healthText = computed(() => {
+  if (!health.value) {
+    return 'Backend status is loading.';
+  }
+  const corpus = health.value.corpus;
+  const buildMillis = corpus?.build?.buildMillis ?? 0;
+  return `Backend ${health.value.status}; local corpus ${corpus?.ready ? 'online' : 'not ready'}; last completed build ${buildMillis} ms.`;
+});
+
+const buildStatusText = computed(() => {
+  const build = overview.value?.build;
+  if (!build) {
+    return 'Corpus build metadata is loading.';
+  }
+  if (build.status === 'reloading') {
+    return 'Background reload is running. Search stays on the previous index until it finishes.';
+  }
+  if (build.status === 'reload-failed') {
+    return build.warnings?.at(-1) ?? 'The last background reload failed.';
+  }
+  return `Index status ${build.status}; vocabulary ${formatNumber(build.vocabularySize)}; postings ${formatNumber(build.indexedPostingCount)}.`;
+});
+
+const resultsQueryText = computed(() => {
+  const currentQuery = searchResponse.value?.query?.trim() || query.value.trim();
+  return currentQuery ? `Query: ${currentQuery}` : 'Query: not set';
+});
+
+const detailSummaryText = computed(() => {
+  if (!selectedDocument.value?.ready) {
+    return 'Choose a result from the left window.';
+  }
+  const document = selectedDocument.value.document;
+  return `${document.year} / ${document.primaryCategory} / ${document.id}`;
+});
+
+const resultsCoverageText = computed(() => {
+  if (!searchResponse.value) {
+    return 'Waiting for a query.';
+  }
+  const displayed = searchResults.value.length;
+  const totalHits = searchResponse.value.totalHits ?? displayed;
+  return `Showing ${formatNumber(displayed)} of ${formatNumber(totalHits)} hits`;
+});
+
+const uploadSelectionText = computed(() => {
+  const fileCount = selectedUploadFiles.value.length;
+  const totalBytes = selectedUploadFiles.value.reduce((sum, file) => sum + file.size, 0);
+  return `${fileCount} file${fileCount > 1 ? 's' : ''} selected / ${formatNumber(totalBytes)} bytes`;
+});
+
+const summaryCards = computed(() => {
+  const build = overview.value?.build;
+  return [
+    {
+      label: 'Corpus size',
+      value: formatNumber(overview.value?.recordCount ?? 0),
+      detail: `${overview.value?.minYear ?? 'n/a'} to ${overview.value?.maxYear ?? 'n/a'}`,
+    },
+    {
+      label: 'Vocabulary',
+      value: formatNumber(build?.vocabularySize ?? 0),
+      detail: `${formatNumber(build?.indexedTermCount ?? 0)} indexed terms`,
+    },
+    {
+      label: 'Postings',
+      value: formatNumber(build?.indexedPostingCount ?? 0),
+      detail: 'Local inverted index footprint',
+    },
+    {
+      label: 'Build time',
+      value: `${build?.buildMillis ?? 0} ms`,
+      detail: build?.status ?? 'unknown',
+    },
+  ];
+});
+
+function formatNumber(value) {
+  return new Intl.NumberFormat('en-US').format(value ?? 0);
+}
+
+function yearWidth(recordCount) {
+  return `${Math.max(8, (recordCount / maxYearCount.value) * 100)}%`;
+}
+
+function updateResultsScrollProgress() {
+  const element = resultsScroller.value;
+  if (!element) {
+    resultsScrollProgress.value = 0;
+    return;
+  }
+  const maxScroll = element.scrollHeight - element.clientHeight;
+  if (maxScroll <= 0) {
+    resultsScrollProgress.value = searchResults.value.length ? 100 : 0;
+    return;
+  }
+  resultsScrollProgress.value = Math.min(100, (element.scrollTop / maxScroll) * 100);
+}
+
+async function resetResultsScroller() {
+  await nextTick();
+  if (resultsScroller.value) {
+    resultsScroller.value.scrollTop = 0;
+  }
+  updateResultsScrollProgress();
+}
+
+const apiBase = (import.meta.env.VITE_API_BASE?.trim() ?? '').replace(/\/$/, '');
+
+function apiUrl(path) {
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return apiBase ? `${apiBase}${normalized}` : normalized;
+}
+
+async function apiFetch(path, options = {}) {
+  const headers = {
+    ...(options.headers ?? {}),
+  };
+  if (!(options.body instanceof FormData) && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const response = await fetch(apiUrl(path), {
+    headers,
+    ...options,
+  });
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') ?? '';
+    let message = `Request failed: ${response.status}`;
+    if (contentType.includes('application/json')) {
+      const payload = await response.json();
+      message = payload.message || payload.error || message;
+    } else {
+      const text = await response.text();
+      if (text.trim()) {
+        message = text.trim();
+      }
+    }
+    throw new Error(message);
+  }
+  return response.json();
+}
+
+async function loadDashboard() {
+  try {
+    const [healthData, overviewData] = await Promise.all([
+      apiFetch('/api/health'),
+      apiFetch('/api/overview'),
+    ]);
+    health.value = healthData;
+    overview.value = overviewData;
+  } catch (error) {
+    uiError.value = error instanceof Error ? error.message : 'Failed to load dashboard data.';
+  }
+}
+
+function openUploadPicker() {
+  uploadInput.value?.click();
+}
+
+function openUploadFolderPicker() {
+  uploadFolderInput.value?.click();
+}
+
+function isUploadFileSupported(file) {
+  const lowercaseName = file.name.toLowerCase();
+  return lowercaseName.endsWith('.json') || lowercaseName.endsWith('.jsonl');
+}
+
+function uploadFileLabel(file) {
+  return file.webkitRelativePath || file.name;
+}
+
+function uploadFileKey(file) {
+  return `${uploadFileLabel(file)}-${file.size}`;
+}
+
+function handleUploadSelection(event) {
+  const files = Array.from(event.target.files ?? []);
+  const supportedFiles = files.filter(isUploadFileSupported);
+  const skippedCount = files.length - supportedFiles.length;
+
+  selectedUploadFiles.value = supportedFiles;
+  uploadResult.value = '';
+  uploadWarnings.value = skippedCount
+    ? [`Skipped ${skippedCount} non-JSON file(s). Only .json and .jsonl are uploaded.`]
+    : [];
+}
+
+function resetUploadSelection() {
+  selectedUploadFiles.value = [];
+  if (uploadInput.value) {
+    uploadInput.value.value = '';
+  }
+  if (uploadFolderInput.value) {
+    uploadFolderInput.value.value = '';
+  }
+}
+
+async function runSearch() {
+  searchPending.value = true;
+  selectedDocument.value = null;
+  try {
+    uiError.value = '';
+    const params = new URLSearchParams();
+    params.set('q', query.value);
+    if (selectedYear.value) {
+      params.set('year', selectedYear.value);
+    }
+    if (selectedCategory.value) {
+      params.set('category', selectedCategory.value);
+    }
+    const response = await apiFetch(`/api/search?${params.toString()}`);
+    searchResponse.value = response;
+    await resetResultsScroller();
+    if (response.results?.length) {
+      await loadDocument(response.results[0].id);
+    }
+  } catch (error) {
+    uiError.value = error instanceof Error ? error.message : 'Search request failed.';
+  } finally {
+    searchPending.value = false;
+  }
+}
+
+async function loadDocument(documentId) {
+  detailPending.value = true;
+  try {
+    uiError.value = '';
+    selectedDocument.value = await apiFetch(`/api/documents/${documentId}`);
+  } catch (error) {
+    uiError.value = error instanceof Error ? error.message : 'Failed to load document detail.';
+  } finally {
+    detailPending.value = false;
+  }
+}
+
+async function uploadCorpus() {
+  if (!selectedUploadFiles.value.length) {
+    return;
+  }
+  uploadPending.value = true;
+  uploadResult.value = '';
+  uploadWarnings.value = [];
+  try {
+    uiError.value = '';
+    const formData = new FormData();
+    selectedUploadFiles.value.forEach((file) => formData.append('files', file));
+    const response = await apiFetch('/api/corpus/upload', {
+      method: 'POST',
+      body: formData,
+    });
+    uploadResult.value = `Imported ${formatNumber(response.importedRecordCount)} records from ${formatNumber(response.fileCount)} file(s).`;
+    uploadWarnings.value = response.warnings ?? [];
+    resetUploadSelection();
+    reloadPending.value = true;
+    await loadDashboard();
+    void pollReloadCompletion();
+  } catch (error) {
+    uiError.value = error instanceof Error ? error.message : 'Failed to upload dataset files.';
+  } finally {
+    uploadPending.value = false;
+  }
+}
+
+async function reloadIndex() {
+  reloadPending.value = true;
+  try {
+    uiError.value = '';
+    await apiFetch('/api/corpus/reload', { method: 'POST' });
+    await loadDashboard();
+    if (overview.value?.build?.status === 'reloading') {
+      void pollReloadCompletion();
+      return;
+    }
+    if (query.value.trim()) {
+      void runSearch();
+    }
+  } catch (error) {
+    uiError.value = error instanceof Error ? error.message : 'Failed to rebuild the local index.';
+  } finally {
+    if (overview.value?.build?.status !== 'reloading') {
+      reloadPending.value = false;
+    }
+  }
+}
+
+async function pollReloadCompletion() {
+  while (reloadPending.value) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    await loadDashboard();
+    if (overview.value?.build?.status === 'reloading') {
+      continue;
+    }
+    reloadPending.value = false;
+    if (query.value.trim()) {
+      void runSearch();
+    }
+  }
+}
 
 onMounted(async () => {
-  try {
-    const response = await fetch('/api/health');
-    const data = await response.json();
-    statusText.value = `Backend status: ${data.status} | module: ${data.processing}`;
-  } catch {
-    statusText.value = 'Backend status: unavailable';
-  }
+  window.addEventListener('resize', updateResultsScrollProgress);
+  await loadDashboard();
+  await runSearch();
+});
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateResultsScrollProgress);
 });
 </script>
