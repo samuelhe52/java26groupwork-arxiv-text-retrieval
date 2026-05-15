@@ -47,6 +47,11 @@ public class CorpusController {
         return corpusIndexService.requestReload();
     }
 
+    @PostMapping("/corpus/analyze")
+    public CorpusResponses.CorpusBuildSummary analyze() {
+        return corpusIndexService.requestReload();
+    }
+
     @PostMapping("/corpus/upload")
     public CorpusResponses.CorpusUploadResponse upload(
             @RequestParam("files") List<MultipartFile> files) {

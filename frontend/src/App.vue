@@ -5,15 +5,15 @@
         <p class="eyebrow">Hadoop Text Retrieval</p>
         <h1>Search arXiv abstracts through a local-first TF-IDF pipeline.</h1>
         <p class="hero-lede">
-          The Spring Boot backend keeps a searchable local TF-IDF index over the JSONL corpus and
-          exposes yearly term signals for quick corpus inspection.
+          The Spring Boot backend stages uploaded corpora and runs the same Hadoop/MapReduce TF,
+          DF, TF-IDF, keyword, and inverted-index flow used for cluster-ready analysis.
         </p>
       </div>
 
       <div class="hero-status">
         <div class="status-badge" :class="overview?.ready ? 'is-ready' : 'is-waiting'">
           <span class="status-dot"></span>
-          <span>{{ overview?.ready ? 'Local index ready' : 'Waiting for corpus' }}</span>
+          <span>{{ statusBadgeText }}</span>
         </div>
         <p class="status-line">
           {{ healthText }}
@@ -21,8 +21,8 @@
         <p class="status-line subtle">
           {{ buildStatusText }}
         </p>
-        <button class="ghost-button" :disabled="reloadPending" @click="reloadIndex">
-          {{ reloadPending ? 'Reloading index...' : 'Reload Local Index' }}
+        <button class="ghost-button" :disabled="analysisPending || uploadPending" @click="runAnalysis">
+          {{ analysisPending ? 'Analyzing...' : analysisButtonText }}
         </button>
       </div>
     </section>
@@ -80,7 +80,8 @@
         <div class="upload-copy">
           <p class="section-label">Dataset Import</p>
           <p class="upload-hint">
-            Choose one or more `.json` or `.jsonl` files, then rebuild the local index.
+            Choose one or more `.json` or `.jsonl` files, upload them to stage the dataset, then
+            run analysis explicitly.
           </p>
         </div>
         <input
@@ -114,6 +115,14 @@
             @click="uploadCorpus"
           >
             {{ uploadPending ? 'Uploading...' : 'Upload dataset' }}
+          </button>
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="analysisPending || uploadPending"
+            @click="runAnalysis"
+          >
+            {{ analysisPending ? 'Analyzing...' : analysisButtonText }}
           </button>
         </div>
         <p class="upload-meta">
@@ -335,7 +344,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 
-const query = ref('graph neural network');
+const query = ref('');
 const selectedYear = ref('');
 const selectedCategory = ref('');
 
@@ -349,13 +358,14 @@ const uploadFolderInput = ref(null);
 
 const searchPending = ref(false);
 const detailPending = ref(false);
-const reloadPending = ref(false);
+const analysisPending = ref(false);
 const uploadPending = ref(false);
 const uiError = ref('');
 const resultsScrollProgress = ref(0);
 const selectedUploadFiles = ref([]);
 const uploadResult = ref('');
 const uploadWarnings = ref([]);
+let analysisPollRun = 0;
 
 const yearOptions = computed(() =>
   (overview.value?.years ?? []).map((entry) => entry.year).sort((left, right) => right - left),
@@ -373,13 +383,31 @@ const searchResults = computed(() => searchResponse.value?.results ?? []);
 
 const searchWarnings = computed(() => searchResponse.value?.warnings ?? []);
 
+const statusBadgeText = computed(() => {
+  const status = overview.value?.build?.status;
+  if (overview.value?.ready) {
+    return 'Index ready';
+  }
+  if (status === 'staged') {
+    return 'Dataset staged';
+  }
+  if (status === 'reloading') {
+    return 'Analysis running';
+  }
+  return 'Waiting for analysis';
+});
+
+const analysisButtonText = computed(() =>
+  overview.value?.ready ? 'Re-run Analysis' : 'Run Analysis',
+);
+
 const healthText = computed(() => {
   if (!health.value) {
     return 'Backend status is loading.';
   }
   const corpus = health.value.corpus;
   const buildMillis = corpus?.build?.buildMillis ?? 0;
-  return `Backend ${health.value.status}; local corpus ${corpus?.ready ? 'online' : 'not ready'}; last completed build ${buildMillis} ms.`;
+  return `Backend ${health.value.status}; corpus ${corpus?.ready ? 'online' : 'not ready'}; last completed build ${buildMillis} ms.`;
 });
 
 const buildStatusText = computed(() => {
@@ -387,8 +415,14 @@ const buildStatusText = computed(() => {
   if (!build) {
     return 'Corpus build metadata is loading.';
   }
+  if (build.status === 'staged') {
+    return 'Dataset upload is staged. Submit analysis to build the Hadoop index.';
+  }
+  if (build.status === 'not-analyzed') {
+    return 'No analysis has run yet. Upload a dataset or analyze the configured dataset.';
+  }
   if (build.status === 'reloading') {
-    return 'Background reload is running. Search stays on the previous index until it finishes.';
+    return 'Background analysis is running through the Hadoop/MapReduce pipeline.';
   }
   if (build.status === 'reload-failed') {
     return build.warnings?.at(-1) ?? 'The last background reload failed.';
@@ -516,7 +550,7 @@ async function apiFetch(path, options = {}) {
   return response.json();
 }
 
-async function loadDashboard() {
+async function loadDashboard({ throwOnError = false } = {}) {
   try {
     const [healthData, overviewData] = await Promise.all([
       apiFetch('/api/health'),
@@ -524,8 +558,13 @@ async function loadDashboard() {
     ]);
     health.value = healthData;
     overview.value = overviewData;
+    return overviewData;
   } catch (error) {
     uiError.value = error instanceof Error ? error.message : 'Failed to load dashboard data.';
+    if (throwOnError) {
+      throw error;
+    }
+    return null;
   }
 }
 
@@ -556,6 +595,9 @@ function handleUploadSelection(event) {
   const skippedCount = files.length - supportedFiles.length;
 
   selectedUploadFiles.value = supportedFiles;
+  selectedDocument.value = null;
+  searchResponse.value = null;
+  resultsScrollProgress.value = 0;
   uploadResult.value = '';
   uploadWarnings.value = skippedCount
     ? [`Skipped ${skippedCount} non-JSON file(s). Only .json and .jsonl are uploaded.`]
@@ -625,12 +667,13 @@ async function uploadCorpus() {
       method: 'POST',
       body: formData,
     });
-    uploadResult.value = `Imported ${formatNumber(response.importedRecordCount)} records from ${formatNumber(response.fileCount)} file(s).`;
+    uploadResult.value = `Staged ${formatNumber(response.importedRecordCount)} records from ${formatNumber(response.fileCount)} file(s). Run analysis to build the index.`;
     uploadWarnings.value = response.warnings ?? [];
     resetUploadSelection();
-    reloadPending.value = true;
-    await loadDashboard();
-    void pollReloadCompletion();
+    selectedDocument.value = null;
+    searchResponse.value = null;
+    resultsScrollProgress.value = 0;
+    await loadDashboard({ throwOnError: true });
   } catch (error) {
     uiError.value = error instanceof Error ? error.message : 'Failed to upload dataset files.';
   } finally {
@@ -638,49 +681,49 @@ async function uploadCorpus() {
   }
 }
 
-async function reloadIndex() {
-  reloadPending.value = true;
+async function runAnalysis() {
+  analysisPending.value = true;
   try {
     uiError.value = '';
-    await apiFetch('/api/corpus/reload', { method: 'POST' });
-    await loadDashboard();
-    if (overview.value?.build?.status === 'reloading') {
-      void pollReloadCompletion();
+    const response = await apiFetch('/api/corpus/analyze', { method: 'POST' });
+    await loadDashboard({ throwOnError: true });
+    if (response.status === 'reloading' || overview.value?.build?.status === 'reloading') {
+      void pollAnalysisCompletion();
       return;
     }
-    if (query.value.trim()) {
-      void runSearch();
-    }
   } catch (error) {
-    uiError.value = error instanceof Error ? error.message : 'Failed to rebuild the local index.';
+    uiError.value = error instanceof Error ? error.message : 'Failed to run corpus analysis.';
   } finally {
     if (overview.value?.build?.status !== 'reloading') {
-      reloadPending.value = false;
+      analysisPending.value = false;
     }
   }
 }
 
-async function pollReloadCompletion() {
-  while (reloadPending.value) {
+async function pollAnalysisCompletion() {
+  const pollRun = ++analysisPollRun;
+  while (analysisPending.value && pollRun === analysisPollRun) {
     await new Promise((resolve) => window.setTimeout(resolve, 1200));
-    await loadDashboard();
+    try {
+      await loadDashboard({ throwOnError: true });
+    } catch {
+      analysisPending.value = false;
+      return;
+    }
     if (overview.value?.build?.status === 'reloading') {
       continue;
     }
-    reloadPending.value = false;
-    if (query.value.trim()) {
-      void runSearch();
-    }
+    analysisPending.value = false;
   }
 }
 
 onMounted(async () => {
   window.addEventListener('resize', updateResultsScrollProgress);
   await loadDashboard();
-  await runSearch();
 });
 
 onUnmounted(() => {
+  analysisPollRun += 1;
   window.removeEventListener('resize', updateResultsScrollProgress);
 });
 </script>
