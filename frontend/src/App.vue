@@ -5,8 +5,8 @@
         <p class="eyebrow">Hadoop Text Retrieval</p>
         <h1>Search arXiv abstracts through a local-first TF-IDF pipeline.</h1>
         <p class="hero-lede">
-          The Spring Boot backend stages uploaded corpora and runs the same Hadoop/MapReduce TF,
-          DF, TF-IDF, keyword, and inverted-index flow used for cluster-ready analysis.
+          The Spring Boot backend builds the search index directly in local development and keeps a
+          Hadoop/MapReduce pipeline available for cluster analysis.
         </p>
       </div>
 
@@ -14,6 +14,11 @@
         <div class="status-badge" :class="overview?.ready ? 'is-ready' : 'is-waiting'">
           <span class="status-dot"></span>
           <span>{{ statusBadgeText }}</span>
+        </div>
+        <div class="dataset-summary">
+          <p class="dataset-summary-label">Active dataset</p>
+          <p class="dataset-summary-name">{{ activeDatasetName }}</p>
+          <p class="dataset-summary-path">{{ activeDatasetPath || 'Dataset path is not available yet.' }}</p>
         </div>
         <p class="status-line">
           {{ healthText }}
@@ -82,6 +87,9 @@
           <p class="upload-hint">
             Choose one or more `.json` or `.jsonl` files, upload them to stage the dataset, then
             run analysis explicitly. The current upload limit is 1 GB per request.
+          </p>
+          <p class="upload-meta dataset-meta">
+            {{ analysisScopeText }}
           </p>
         </div>
         <input
@@ -383,6 +391,17 @@ const searchResults = computed(() => searchResponse.value?.results ?? []);
 
 const searchWarnings = computed(() => searchResponse.value?.warnings ?? []);
 
+const activeDatasetPath = computed(
+  () => overview.value?.datasetDir || health.value?.corpus?.build?.datasetDir || '',
+);
+
+const activeDatasetName = computed(() => {
+  if (overview.value?.datasetName) {
+    return overview.value.datasetName;
+  }
+  return datasetNameFromPath(activeDatasetPath.value) || 'No dataset selected';
+});
+
 const statusBadgeText = computed(() => {
   const status = overview.value?.build?.status;
   if (overview.value?.ready) {
@@ -407,7 +426,7 @@ const healthText = computed(() => {
   }
   const corpus = health.value.corpus;
   const buildMillis = corpus?.build?.buildMillis ?? 0;
-  return `Backend ${health.value.status}; corpus ${corpus?.ready ? 'online' : 'not ready'}; last completed build ${buildMillis} ms.`;
+  return `Backend ${health.value.status}; corpus ${corpus?.ready ? 'online' : 'not ready'}; active dataset ${activeDatasetName.value}; last completed build ${buildMillis} ms.`;
 });
 
 const buildStatusText = computed(() => {
@@ -416,18 +435,25 @@ const buildStatusText = computed(() => {
     return 'Corpus build metadata is loading.';
   }
   if (build.status === 'staged') {
-    return 'Dataset upload is staged. Submit analysis to build the Hadoop index.';
+    return `Dataset "${activeDatasetName.value}" is staged. Submit analysis to build the search index.`;
   }
   if (build.status === 'not-analyzed') {
-    return 'No analysis has run yet. Upload a dataset and then submit analysis.';
+    return `No analysis has run yet for "${activeDatasetName.value}". Submit analysis to build the search index.`;
   }
   if (build.status === 'reloading') {
-    return 'Background analysis is running through the Hadoop/MapReduce pipeline.';
+    return `Background analysis is running for "${activeDatasetName.value}".`;
   }
   if (build.status === 'reload-failed') {
     return build.warnings?.at(-1) ?? 'The last background reload failed.';
   }
-  return `Index status ${build.status}; vocabulary ${formatNumber(build.vocabularySize)}; postings ${formatNumber(build.indexedPostingCount)}.`;
+  return `Dataset "${activeDatasetName.value}" index status ${build.status}; vocabulary ${formatNumber(build.vocabularySize)}; postings ${formatNumber(build.indexedPostingCount)}.`;
+});
+
+const analysisScopeText = computed(() => {
+  if (!activeDatasetPath.value) {
+    return 'No dataset is configured yet. Upload a dataset before running analysis.';
+  }
+  return `Analysis is currently scoped to "${activeDatasetName.value}" at ${activeDatasetPath.value}.`;
 });
 
 const resultsQueryText = computed(() => {
@@ -486,6 +512,14 @@ const summaryCards = computed(() => {
 
 function formatNumber(value) {
   return new Intl.NumberFormat('en-US').format(value ?? 0);
+}
+
+function datasetNameFromPath(datasetPath) {
+  if (!datasetPath) {
+    return '';
+  }
+  const segments = datasetPath.split(/[\\/]/).filter(Boolean);
+  return segments.at(-1) ?? datasetPath;
 }
 
 function yearWidth(recordCount) {

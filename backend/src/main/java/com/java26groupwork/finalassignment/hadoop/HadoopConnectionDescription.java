@@ -8,8 +8,8 @@ public final class HadoopConnectionDescription {
     private final String yarnClusterId;
     private final String inputPath;
     private final String outputPath;
-    private final String localBasePath;
     private final String configDir;
+    private final int reducerTasks;
 
     public HadoopConnectionDescription(
             String mode,
@@ -18,16 +18,16 @@ public final class HadoopConnectionDescription {
             String yarnClusterId,
             String inputPath,
             String outputPath,
-            String localBasePath,
-            String configDir) {
+            String configDir,
+            int reducerTasks) {
         this.mode = mode;
         this.fsDefaultFs = fsDefaultFs;
         this.nameservice = nameservice;
         this.yarnClusterId = yarnClusterId;
         this.inputPath = inputPath;
         this.outputPath = outputPath;
-        this.localBasePath = localBasePath;
         this.configDir = configDir;
+        this.reducerTasks = reducerTasks;
     }
 
     public String getMode() {
@@ -54,11 +54,11 @@ public final class HadoopConnectionDescription {
         return outputPath;
     }
 
-    public String getLocalBasePath() {
-        return localBasePath;
-    }
-
     public String getConfigDir() {
         return configDir;
+    }
+
+    public int getReducerTasks() {
+        return reducerTasks;
     }
 }

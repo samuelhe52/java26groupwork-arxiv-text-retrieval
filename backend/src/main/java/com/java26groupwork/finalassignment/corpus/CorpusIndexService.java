@@ -77,9 +77,9 @@ public class CorpusIndexService {
     public synchronized CorpusResponses.CorpusBuildSummary reload() {
         Path datasetDir = requireActiveDatasetDir();
         try {
-            HadoopProcessingService.ProcessingArtifacts artifacts =
-                    hadoopProcessingService.processDataset(datasetDir, properties);
-            this.snapshot = buildSnapshot(artifacts);
+            this.snapshot = hadoopProcessingService.isLocalMode()
+                    ? buildLocalSnapshot(datasetDir)
+                    : buildSnapshot(hadoopProcessingService.processDataset(datasetDir, properties));
             this.lastReloadError = null;
             return snapshot.buildSummary;
         } finally {
@@ -198,7 +198,7 @@ public class CorpusIndexService {
         CorpusResponses.CorpusBuildSummary build = buildSummary();
         return new CorpusResponses.CorpusOverviewResponse(
                 current.ready,
-                "hadoop-pipeline",
+                hadoopProcessingService.describe(),
                 current.datasetName,
                 current.datasetDir,
                 build.getStatus(),
@@ -455,6 +455,168 @@ public class CorpusIndexService {
                     maxYear[0] == Integer.MIN_VALUE ? 0 : maxYear[0]);
         } catch (IOException exception) {
             throw new UncheckedIOException("Failed to read Hadoop processing outputs.", exception);
+        }
+    }
+
+    private CorpusIndexSnapshot buildLocalSnapshot(Path datasetDir) {
+        long startNanos = System.nanoTime();
+        Instant builtAt = Instant.now();
+        List<String> warnings = new ArrayList<>();
+        List<StoredDocument> documents = new ArrayList<>();
+        List<Map<String, Integer>> documentTermFrequencies = new ArrayList<>();
+        Map<String, Integer> documentOrdinalsById = new HashMap<>();
+        Map<String, Integer> documentFrequency = new HashMap<>();
+        Map<String, Integer> primaryCategoryCounts = new HashMap<>();
+        Map<String, Integer> globalTermFrequency = new HashMap<>();
+        Map<Integer, Map<String, Integer>> yearlyTermFrequency = new TreeMap<>();
+        Map<Integer, Integer> yearlyTokenTotals = new TreeMap<>();
+        Map<Integer, Integer> yearlyCounts = new TreeMap<>();
+
+        int minYear = Integer.MAX_VALUE;
+        int maxYear = Integer.MIN_VALUE;
+
+        try {
+            for (Path shard : datasetShardPaths(datasetDir)) {
+                try (BufferedReader reader = Files.newBufferedReader(shard, StandardCharsets.UTF_8)) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.isBlank()) {
+                            continue;
+                        }
+                        JsonNode node = objectMapper.readTree(line);
+                        String documentId = CorpusTokenizer.normalize(node.path("id").asText(""));
+                        if (documentId.isBlank()) {
+                            warnings.add("Skipped a record with blank id while building the local search snapshot.");
+                            continue;
+                        }
+                        if (documentOrdinalsById.containsKey(documentId)) {
+                            warnings.add("Skipped duplicate document id during local analysis: " + documentId);
+                            continue;
+                        }
+
+                        StoredDocument document = toDocument(node, documents.size());
+                        documents.add(document);
+                        documentOrdinalsById.put(documentId, document.getOrdinal());
+                        primaryCategoryCounts.merge(document.getPrimaryCategory(), 1, Integer::sum);
+                        yearlyCounts.merge(document.getYear(), 1, Integer::sum);
+                        minYear = Math.min(minYear, document.getYear());
+                        maxYear = Math.max(maxYear, document.getYear());
+
+                        Map<String, Integer> termCounts = new HashMap<>();
+                        for (String token : CorpusTokenizer.tokenize(document.getTitle() + "\n\n" + document.getAbstractText())) {
+                            termCounts.merge(token, 1, Integer::sum);
+                            globalTermFrequency.merge(token, 1, Integer::sum);
+                            yearlyTermFrequency.computeIfAbsent(document.getYear(), ignored -> new HashMap<>())
+                                    .merge(token, 1, Integer::sum);
+                            yearlyTokenTotals.merge(document.getYear(), 1, Integer::sum);
+                        }
+                        for (String term : termCounts.keySet()) {
+                            documentFrequency.merge(term, 1, Integer::sum);
+                        }
+                        documentTermFrequencies.add(termCounts);
+                    }
+                }
+            }
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to read the local dataset.", exception);
+        }
+
+        if (documents.isEmpty()) {
+            return CorpusIndexSnapshot.empty(activeDatasetDir.toString(), "empty-dataset", limitWarnings(warnings));
+        }
+
+        double maxDocumentFrequency = documents.size() * properties.getIndexMaxDocumentFrequencyRatio();
+        Map<String, PostingAccumulator> postingAccumulators = new HashMap<>();
+        List<List<CorpusResponses.DocumentKeyword>> documentKeywords = new ArrayList<>(documents.size());
+
+        for (int ordinal = 0; ordinal < documents.size(); ordinal++) {
+            Map<String, Integer> termCounts = documentTermFrequencies.get(ordinal);
+            ArrayList<KeywordCandidate> keywordCandidates = new ArrayList<>(termCounts.size());
+            for (Map.Entry<String, Integer> entry : termCounts.entrySet()) {
+                String term = entry.getKey();
+                int termFrequency = entry.getValue();
+                int df = documentFrequency.getOrDefault(term, 0);
+                if (df <= 0) {
+                    continue;
+                }
+                double score = (1.0d + Math.log(termFrequency))
+                        * (Math.log((documents.size() + 1.0d) / (df + 1.0d)) + 1.0d);
+                keywordCandidates.add(new KeywordCandidate(term, score));
+                if (df <= maxDocumentFrequency) {
+                    postingAccumulators.computeIfAbsent(term, ignored -> new PostingAccumulator())
+                            .add(ordinal, score);
+                }
+            }
+            keywordCandidates.sort(Comparator.comparingDouble(KeywordCandidate::score).reversed()
+                    .thenComparing(KeywordCandidate::term));
+            documentKeywords.add(keywordCandidates.stream()
+                    .limit(properties.getDocumentKeywordCount())
+                    .map(candidate -> new CorpusResponses.DocumentKeyword(
+                            candidate.term(),
+                            roundScore(candidate.score())))
+                    .toList());
+        }
+
+        Map<String, CorpusIndexSnapshot.PostingList> postings = freezePostings(postingAccumulators);
+        long indexedPostingCount = postingAccumulators.values().stream()
+                .mapToLong(PostingAccumulator::size)
+                .sum();
+
+        List<CorpusResponses.CorpusYearSummary> yearSummaries = buildYearSummaries(
+                yearlyCounts,
+                yearlyTermFrequency,
+                yearlyTokenTotals,
+                globalTermFrequency,
+                properties.getYearKeywordSince(),
+                properties.getYearKeywordCount(),
+                properties.getYearKeywordMinCount());
+
+        List<CorpusResponses.NamedCount> topCategories = topCounts(primaryCategoryCounts, 12);
+        List<CorpusResponses.NamedCount> topTerms = topCounts(globalTermFrequency, 20);
+        long buildMillis = elapsedMillis(startNanos);
+        List<String> limitedWarnings = limitWarnings(warnings);
+
+        CorpusResponses.CorpusBuildSummary buildSummary = new CorpusResponses.CorpusBuildSummary(
+                "ready",
+                activeDatasetDir.toString(),
+                builtAt,
+                buildMillis,
+                documents.size(),
+                globalTermFrequency.size(),
+                postings.size(),
+                indexedPostingCount,
+                limitedWarnings);
+
+        return new CorpusIndexSnapshot(
+                true,
+                "ready",
+                activeDatasetDir.getFileName() == null ? activeDatasetDir.toString() : activeDatasetDir.getFileName().toString(),
+                activeDatasetDir.toString(),
+                limitedWarnings,
+                List.copyOf(documents),
+                Map.copyOf(documentOrdinalsById),
+                Map.copyOf(documentFrequency),
+                Map.copyOf(postings),
+                List.copyOf(documentKeywords),
+                topCategories,
+                topTerms,
+                yearSummaries,
+                buildSummary,
+                builtAt,
+                minYear == Integer.MAX_VALUE ? 0 : minYear,
+                maxYear == Integer.MIN_VALUE ? 0 : maxYear);
+    }
+
+    private List<Path> datasetShardPaths(Path datasetDir) throws IOException {
+        Path yearsDir = datasetDir.resolve("years");
+        Path shardDirectory = Files.isDirectory(yearsDir) ? yearsDir : datasetDir;
+        if (!Files.isDirectory(shardDirectory)) {
+            throw new IllegalArgumentException("Dataset years directory does not exist: " + yearsDir);
+        }
+        try (var stream = Files.list(shardDirectory)) {
+            return stream.filter(path -> path.getFileName().toString().endsWith(".jsonl"))
+                    .sorted()
+                    .toList();
         }
     }
 

@@ -124,6 +124,40 @@ button {
   color: rgba(255, 248, 238, 0.72);
 }
 
+.dataset-summary {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 248, 238, 0.14);
+  border-radius: 18px;
+  background: rgba(255, 248, 238, 0.08);
+}
+
+.dataset-summary-label,
+.dataset-summary-name,
+.dataset-summary-path {
+  margin: 0;
+}
+
+.dataset-summary-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: rgba(255, 248, 238, 0.72);
+}
+
+.dataset-summary-name {
+  font-weight: 600;
+  color: #fff8ee;
+}
+
+.dataset-summary-path {
+  color: rgba(255, 248, 238, 0.78);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -264,6 +298,10 @@ button {
   margin: 0;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.dataset-meta {
+  word-break: break-word;
 }
 
 .upload-actions {

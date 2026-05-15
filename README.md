@@ -78,7 +78,7 @@ For normal backend development, use the default `local` mode. This does not requ
 make backend-run
 ```
 
-In this mode, the backend uses `file:///` and keeps the Hadoop integration path simple while the web/API code is still being built.
+In this mode, the backend reads the dataset directly and builds the TF-IDF search snapshot in-process, without writing Hadoop job artifacts to a local temp tree.
 
 ## Cluster Testing
 
