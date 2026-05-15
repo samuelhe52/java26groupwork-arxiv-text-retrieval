@@ -93,7 +93,7 @@ public final class TfIdfJob {
             for (TermFrequencyRow row : rows) {
                 double score = (1.0d + Math.log(row.getTermFrequency())) * idf;
                 context.write(
-                        new Text(term.toString() + "\t" + row.getDocumentId() + "\t" + row.getTermFrequency()),
+                        new Text(term.toString() + "\t" + row.getDocumentId()),
                         new Text(String.format(Locale.ROOT, "%.6f", score)));
             }
         }

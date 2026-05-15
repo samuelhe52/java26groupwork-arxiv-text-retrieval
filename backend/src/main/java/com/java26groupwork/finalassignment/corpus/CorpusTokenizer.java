@@ -1,6 +1,7 @@
 package com.java26groupwork.finalassignment.corpus;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -51,18 +52,39 @@ public final class CorpusTokenizer {
     }
 
     public static List<String> tokenize(String text) {
-        String normalized = normalize(text).toLowerCase();
-        if (normalized.isEmpty()) {
+        return tokenizeNormalized(normalize(text));
+    }
+
+    public static List<String> tokenizeNormalized(String normalizedText) {
+        if (normalizedText == null || normalizedText.isEmpty()) {
             return List.of();
         }
-        Matcher matcher = WORD_PATTERN.matcher(normalized);
         java.util.ArrayList<String> tokens = new java.util.ArrayList<>();
+        appendTokens(normalizedText, tokens);
+        return tokens.isEmpty() ? List.of() : tokens;
+    }
+
+    public static List<String> tokenizeNormalizedParts(String... normalizedParts) {
+        if (normalizedParts == null || normalizedParts.length == 0) {
+            return List.of();
+        }
+        java.util.ArrayList<String> tokens = new java.util.ArrayList<>();
+        for (String normalizedPart : normalizedParts) {
+            if (normalizedPart == null || normalizedPart.isEmpty()) {
+                continue;
+            }
+            appendTokens(normalizedPart, tokens);
+        }
+        return tokens.isEmpty() ? List.of() : tokens;
+    }
+
+    private static void appendTokens(String normalizedText, java.util.ArrayList<String> tokens) {
+        Matcher matcher = WORD_PATTERN.matcher(normalizedText.toLowerCase(Locale.ROOT));
         while (matcher.find()) {
             String token = matcher.group();
             if (!STOPWORDS.contains(token)) {
                 tokens.add(token);
             }
         }
-        return tokens;
     }
 }
