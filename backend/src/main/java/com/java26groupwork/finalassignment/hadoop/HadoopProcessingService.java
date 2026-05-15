@@ -194,10 +194,17 @@ public class HadoopProcessingService {
     private StageResult stageDataset(
             Path sourceDatasetDir, FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory) throws IOException {
         Path yearsDir = sourceDatasetDir.resolve("years");
-        if (!Files.isDirectory(yearsDir)) {
-            throw new IllegalArgumentException("Dataset years directory does not exist: " + yearsDir);
+        if (Files.isDirectory(yearsDir)) {
+            return stageLocalDataset(yearsDir, fileSystem, inputDirectory);
         }
+        if (properties.getMode() == HadoopProperties.Mode.CLUSTER) {
+            return stageClusterDataset(fileSystem, inputDirectory);
+        }
+        throw new IllegalArgumentException("Dataset years directory does not exist: " + yearsDir);
+    }
 
+    private StageResult stageLocalDataset(
+            Path yearsDir, FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory) throws IOException {
         List<String> warnings = new ArrayList<>();
         Set<String> seenDocumentIds = new LinkedHashSet<>();
         int documentCount = 0;
@@ -213,30 +220,77 @@ public class HadoopProcessingService {
 
             for (Path shard : shards) {
                 try (BufferedReader reader = Files.newBufferedReader(shard, StandardCharsets.UTF_8)) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        if (line.isBlank()) {
-                            continue;
-                        }
-                        JsonNode node = objectMapper.readTree(line);
-                        String documentId = node.path("id").asText("").trim();
-                        if (documentId.isBlank()) {
-                            warnings.add("Skipped a record with a blank id while staging Hadoop input.");
-                            continue;
-                        }
-                        if (!seenDocumentIds.add(documentId)) {
-                            warnings.add("Skipped duplicate document id during staging: " + documentId);
-                            continue;
-                        }
-                        int year = node.path("year").asInt(0);
-                        writers.write(year, node);
-                        documentCount++;
-                    }
+                    documentCount += stageRecords(reader, writers, warnings, seenDocumentIds);
                 }
             }
         }
 
         return new StageResult(documentCount, limitWarnings(warnings));
+    }
+
+    private StageResult stageClusterDataset(FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory)
+            throws IOException {
+        String configuredInputPath = properties.getInputPath();
+        if (configuredInputPath == null || configuredInputPath.isBlank()) {
+            throw new IllegalArgumentException("app.hadoop.input-path must be configured for cluster mode.");
+        }
+
+        org.apache.hadoop.fs.Path sourceInputPath = new org.apache.hadoop.fs.Path(configuredInputPath);
+        if (!fileSystem.exists(sourceInputPath)) {
+            throw new IllegalArgumentException("Configured Hadoop input path does not exist: " + sourceInputPath);
+        }
+
+        List<String> warnings = new ArrayList<>();
+        Set<String> seenDocumentIds = new LinkedHashSet<>();
+        int documentCount = 0;
+
+        try (StagingWriters writers = new StagingWriters(fileSystem, inputDirectory, objectMapper)) {
+            FileStatus[] statuses = fileSystem.listStatus(sourceInputPath);
+            ArrayList<org.apache.hadoop.fs.Path> shards = new ArrayList<>();
+            for (FileStatus status : statuses) {
+                if (status.isFile() && status.getPath().getName().endsWith(".jsonl")) {
+                    shards.add(status.getPath());
+                }
+            }
+            shards.sort(java.util.Comparator.comparing(org.apache.hadoop.fs.Path::toString));
+
+            for (org.apache.hadoop.fs.Path shard : shards) {
+                try (BufferedReader reader = new BufferedReader(
+                        new java.io.InputStreamReader(fileSystem.open(shard), StandardCharsets.UTF_8))) {
+                    documentCount += stageRecords(reader, writers, warnings, seenDocumentIds);
+                }
+            }
+        }
+
+        return new StageResult(documentCount, limitWarnings(warnings));
+    }
+
+    private int stageRecords(
+            BufferedReader reader,
+            StagingWriters writers,
+            List<String> warnings,
+            Set<String> seenDocumentIds) throws IOException {
+        int documentCount = 0;
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (line.isBlank()) {
+                continue;
+            }
+            JsonNode node = objectMapper.readTree(line);
+            String documentId = node.path("id").asText("").trim();
+            if (documentId.isBlank()) {
+                warnings.add("Skipped a record with a blank id while staging Hadoop input.");
+                continue;
+            }
+            if (!seenDocumentIds.add(documentId)) {
+                warnings.add("Skipped duplicate document id during staging: " + documentId);
+                continue;
+            }
+            int year = node.path("year").asInt(0);
+            writers.write(year, node);
+            documentCount++;
+        }
+        return documentCount;
     }
 
     private void runJob(Job job) throws IOException, ClassNotFoundException, InterruptedException {

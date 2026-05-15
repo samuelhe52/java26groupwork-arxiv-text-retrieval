@@ -2,6 +2,7 @@ package com.java26groupwork.finalassignment.api;
 
 import com.java26groupwork.finalassignment.corpus.CorpusIndexService;
 import com.java26groupwork.finalassignment.corpus.CorpusResponses;
+import java.io.UncheckedIOException;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -44,12 +45,20 @@ public class CorpusController {
 
     @PostMapping("/corpus/reload")
     public CorpusResponses.CorpusBuildSummary reload() {
-        return corpusIndexService.requestReload();
+        try {
+            return corpusIndexService.requestReload();
+        } catch (IllegalArgumentException exception) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, exception.getMessage(), exception);
+        }
     }
 
     @PostMapping("/corpus/analyze")
     public CorpusResponses.CorpusBuildSummary analyze() {
-        return corpusIndexService.requestReload();
+        try {
+            return corpusIndexService.requestReload();
+        } catch (IllegalArgumentException exception) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, exception.getMessage(), exception);
+        }
     }
 
     @PostMapping("/corpus/upload")
@@ -57,7 +66,7 @@ public class CorpusController {
             @RequestParam("files") List<MultipartFile> files) {
         try {
             return corpusIndexService.importUploadedCorpus(files);
-        } catch (IllegalArgumentException exception) {
+        } catch (IllegalArgumentException | UncheckedIOException exception) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, exception.getMessage(), exception);
         }
     }

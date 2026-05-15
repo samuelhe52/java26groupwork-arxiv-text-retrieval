@@ -4,6 +4,7 @@ import com.java26groupwork.finalassignment.corpus.CorpusIndexService;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,17 +37,14 @@ class CorpusControllerTest {
 
     @DynamicPropertySource
     static void registerProperties(DynamicPropertyRegistry registry) throws Exception {
-        Path datasetDir = new ClassPathResource("sample-dataset").getFile().toPath();
         localHadoopBaseDir = Files.createTempDirectory("hadoop-local-test-");
-        registry.add("app.corpus.dataset-dir", datasetDir::toString);
-        registry.add("app.corpus.auto-load", () -> "false");
         registry.add("app.corpus.index-max-document-frequency-ratio", () -> "1.0");
         registry.add("app.hadoop.local-base-path", () -> localHadoopBaseDir.toString());
     }
 
     @BeforeEach
-    void loadSampleCorpus() {
-        corpusIndexService.restoreConfiguredDataset();
+    void loadSampleCorpus() throws Exception {
+        stageAndAnalyzeSampleCorpus();
     }
 
     @Test
@@ -75,6 +73,18 @@ class CorpusControllerTest {
         mockMvc.perform(post("/api/corpus/reload"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("reloading"));
+    }
+
+    @Test
+    void analyzeEndpointRejectsMissingDataset() throws Exception {
+        CorpusIndexService freshService = new CorpusIndexService(
+                new com.java26groupwork.finalassignment.corpus.CorpusProperties(),
+                new com.fasterxml.jackson.databind.ObjectMapper(),
+                org.mockito.Mockito.mock(com.java26groupwork.finalassignment.hadoop.HadoopProcessingService.class));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(freshService::requestReload)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Upload a dataset before submitting analysis.");
     }
 
     @Test
@@ -120,6 +130,19 @@ class CorpusControllerTest {
                 .andExpect(jsonPath("$.importedRecordCount").value(2))
                 .andExpect(jsonPath("$.uploadedFiles[0]").value("uploaded.json"))
                 .andExpect(jsonPath("$.build.status").value("staged"));
+    }
+
+    @Test
+    void uploadEndpointReturnsBadRequestForMalformedJson() throws Exception {
+        MockMultipartFile file = new MockMultipartFile(
+                "files",
+                "broken.json",
+                "application/json",
+                "{\"papers\": [".getBytes());
+
+        mockMvc.perform(multipart("/api/corpus/upload").file(file))
+                .andExpect(status().isBadRequest())
+                .andExpect(status().reason(org.hamcrest.Matchers.containsString("Unexpected end-of-input")));
     }
 
     @Test
@@ -200,5 +223,30 @@ class CorpusControllerTest {
         mockMvc.perform(get("/api/overview"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("\"status\":\"" + expectedStatus + "\"")));
+    }
+
+    private void stageAndAnalyzeSampleCorpus() throws Exception {
+        Path yearsDir = new ClassPathResource("sample-dataset/years").getFile().toPath();
+        List<MockMultipartFile> files;
+        try (var stream = Files.list(yearsDir)) {
+            files = stream
+                    .filter(path -> path.getFileName().toString().endsWith(".jsonl"))
+                    .sorted()
+                    .map(path -> {
+                        try {
+                            return new MockMultipartFile(
+                                    "files",
+                                    path.getFileName().toString(),
+                                    "application/json",
+                                    Files.readAllBytes(path));
+                        } catch (Exception exception) {
+                            throw new RuntimeException(exception);
+                        }
+                    })
+                    .toList();
+        }
+
+        corpusIndexService.importUploadedCorpus(List.copyOf(files));
+        corpusIndexService.reload();
     }
 }
