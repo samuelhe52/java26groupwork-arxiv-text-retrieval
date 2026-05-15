@@ -2,7 +2,6 @@ package com.java26groupwork.finalassignment.hadoop.jobs;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -45,10 +44,10 @@ public final class InvertedIndexJob {
         protected void map(LongWritable key, Text value, Context context)
                 throws IOException, InterruptedException {
             String[] parts = value.toString().split("\t");
-            if (parts.length < 4) {
+            if (parts.length < 3) {
                 return;
             }
-            context.write(new Text(parts[0]), new Text("POSTING\t" + parts[1] + "\t" + parts[2] + "\t" + parts[3]));
+            context.write(new Text(parts[0]), new Text("POSTING\t" + parts[1] + "\t" + parts[2]));
         }
     }
 
@@ -84,10 +83,10 @@ public final class InvertedIndexJob {
                     documentFrequency = Integer.parseInt(parts[1]);
                     continue;
                 }
-                if (!"POSTING".equals(parts[0]) || parts.length < 4) {
+                if (!"POSTING".equals(parts[0]) || parts.length < 3) {
                     continue;
                 }
-                postings.add(new PostingRow(parts[1], Integer.parseInt(parts[2]), Double.parseDouble(parts[3])));
+                postings.add(new PostingRow(parts[1], Double.parseDouble(parts[2])));
             }
 
             if (documentFrequency <= 0) {
@@ -99,32 +98,23 @@ public final class InvertedIndexJob {
                 return;
             }
 
-            postings.sort(Comparator.comparingDouble(PostingRow::getScore).reversed());
             for (PostingRow row : postings) {
-                context.write(
-                        term,
-                        new Text(row.getDocumentId() + "\t" + row.getTermFrequency() + "\t" + row.getScore()));
+                context.write(term, new Text(row.getDocumentId() + "\t" + row.getScore()));
             }
         }
     }
 
     private static final class PostingRow {
         private final String documentId;
-        private final int termFrequency;
         private final double score;
 
-        private PostingRow(String documentId, int termFrequency, double score) {
+        private PostingRow(String documentId, double score) {
             this.documentId = documentId;
-            this.termFrequency = termFrequency;
             this.score = score;
         }
 
         private String getDocumentId() {
             return documentId;
-        }
-
-        private int getTermFrequency() {
-            return termFrequency;
         }
 
         private double getScore() {

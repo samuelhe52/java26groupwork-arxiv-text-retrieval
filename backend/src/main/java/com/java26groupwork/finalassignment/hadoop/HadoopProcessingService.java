@@ -69,7 +69,8 @@ public class HadoopProcessingService {
                 properties.getInputPath(),
                 properties.getOutputPath(),
                 properties.getConfigDir(),
-                properties.getReducerTasks());
+                properties.getReducerTasks(),
+                properties.getJobJar());
     }
 
     public ProcessingArtifacts processDataset(Path sourceDatasetDir, CorpusProperties corpusProperties) {
@@ -82,7 +83,7 @@ public class HadoopProcessingService {
 
         try {
             FileSystem fileSystem = FileSystem.get(configuration);
-            WorkPaths workPaths = createWorkPaths(sourceDatasetDir);
+            WorkPaths workPaths = createWorkPaths();
             deleteIfExists(fileSystem, workPaths.root());
             fileSystem.mkdirs(workPaths.root());
             fileSystem.mkdirs(workPaths.input());
@@ -92,7 +93,7 @@ public class HadoopProcessingService {
                 return new ProcessingArtifacts(
                         sourceDatasetDir.toAbsolutePath().normalize(),
                         workPaths.root(),
-                        workPaths.input(),
+                        stageResult.inputPath(),
                         workPaths.termFrequency(),
                         workPaths.documentFrequency(),
                         workPaths.tfIdf(),
@@ -108,15 +109,17 @@ public class HadoopProcessingService {
 
             Job termFrequencyJob = TermFrequencyJob.createJob(
                     new org.apache.hadoop.conf.Configuration(configuration),
-                    workPaths.input(),
+                    stageResult.inputPath(),
                     workPaths.termFrequency());
+            applyJobJar(termFrequencyJob);
             applyReducerTasks(termFrequencyJob, reducerTasks);
             runJob(termFrequencyJob);
 
             Job documentFrequencyJob = DocumentFrequencyJob.createJob(
                     new org.apache.hadoop.conf.Configuration(configuration),
-                    workPaths.input(),
+                    stageResult.inputPath(),
                     workPaths.documentFrequency());
+            applyJobJar(documentFrequencyJob);
             applyReducerTasks(documentFrequencyJob, reducerTasks);
             runJob(documentFrequencyJob);
 
@@ -128,6 +131,7 @@ public class HadoopProcessingService {
                     workPaths.termFrequency(),
                     workPaths.documentFrequency(),
                     workPaths.tfIdf());
+            applyJobJar(tfIdfJob);
             applyReducerTasks(tfIdfJob, reducerTasks);
             runJob(tfIdfJob);
 
@@ -139,6 +143,7 @@ public class HadoopProcessingService {
                     keywordsConfiguration,
                     workPaths.tfIdf(),
                     workPaths.documentKeywords());
+            applyJobJar(documentKeywordsJob);
             applyReducerTasks(documentKeywordsJob, reducerTasks);
             runJob(documentKeywordsJob);
 
@@ -153,13 +158,14 @@ public class HadoopProcessingService {
                     workPaths.tfIdf(),
                     workPaths.documentFrequency(),
                     workPaths.invertedIndex());
+            applyJobJar(invertedIndexJob);
             applyReducerTasks(invertedIndexJob, reducerTasks);
             runJob(invertedIndexJob);
 
             return new ProcessingArtifacts(
                     sourceDatasetDir.toAbsolutePath().normalize(),
                     workPaths.root(),
-                    workPaths.input(),
+                    stageResult.inputPath(),
                     workPaths.termFrequency(),
                     workPaths.documentFrequency(),
                     workPaths.tfIdf(),
@@ -208,7 +214,7 @@ public class HadoopProcessingService {
         return Files.isDirectory(parent) ? parent : configuredPath;
     }
 
-    private WorkPaths createWorkPaths(Path sourceDatasetDir) {
+    private WorkPaths createWorkPaths() {
         String runId = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(java.time.LocalDateTime.now());
         org.apache.hadoop.fs.Path root = new org.apache.hadoop.fs.Path(
                 new org.apache.hadoop.fs.Path(properties.getOutputPath()),
@@ -250,7 +256,7 @@ public class HadoopProcessingService {
         Set<String> seenDocumentIds = new LinkedHashSet<>();
         int documentCount = 0;
 
-        try (StagingWriters writers = new StagingWriters(fileSystem, inputDirectory, objectMapper)) {
+        try (StagingWriters writers = new StagingWriters(fileSystem, inputDirectory)) {
             List<Path> shards;
             try (var stream = Files.list(yearsDir)) {
                 shards = stream
@@ -265,7 +271,7 @@ public class HadoopProcessingService {
                 }
             }
 
-            return new StageResult(documentCount, shards.size(), limitWarnings(warnings));
+            return new StageResult(inputDirectory, documentCount, shards.size(), limitWarnings(warnings));
         }
     }
 
@@ -281,20 +287,26 @@ public class HadoopProcessingService {
             throw new IllegalArgumentException("Configured Hadoop input path does not exist: " + sourceInputPath);
         }
 
+        PreparedClusterInput preparedClusterInput = resolvePreparedClusterInput(fileSystem, sourceInputPath);
+        if (preparedClusterInput != null) {
+            return new StageResult(
+                    preparedClusterInput.inputPath(),
+                    preparedClusterInput.documentCount(),
+                    preparedClusterInput.inputShardCount(),
+                    List.of());
+        }
+
         List<String> warnings = new ArrayList<>();
         Set<String> seenDocumentIds = new LinkedHashSet<>();
         int documentCount = 0;
+        List<org.apache.hadoop.fs.Path> shards = listJsonlInputs(fileSystem, sourceInputPath);
+        if (shards.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Configured Hadoop input path must be a .jsonl file, a shard directory, or a dataset root with years/ shards: "
+                            + sourceInputPath);
+        }
 
-        try (StagingWriters writers = new StagingWriters(fileSystem, inputDirectory, objectMapper)) {
-            FileStatus[] statuses = fileSystem.listStatus(sourceInputPath);
-            ArrayList<org.apache.hadoop.fs.Path> shards = new ArrayList<>();
-            for (FileStatus status : statuses) {
-                if (status.isFile() && status.getPath().getName().endsWith(".jsonl")) {
-                    shards.add(status.getPath());
-                }
-            }
-            shards.sort(java.util.Comparator.comparing(org.apache.hadoop.fs.Path::toString));
-
+        try (StagingWriters writers = new StagingWriters(fileSystem, inputDirectory)) {
             for (org.apache.hadoop.fs.Path shard : shards) {
                 try (BufferedReader reader = new BufferedReader(
                         new java.io.InputStreamReader(fileSystem.open(shard), StandardCharsets.UTF_8))) {
@@ -302,7 +314,7 @@ public class HadoopProcessingService {
                 }
             }
 
-            return new StageResult(documentCount, shards.size(), limitWarnings(warnings));
+            return new StageResult(inputDirectory, documentCount, shards.size(), limitWarnings(warnings));
         }
     }
 
@@ -328,10 +340,117 @@ public class HadoopProcessingService {
                 continue;
             }
             int year = node.path("year").asInt(0);
-            writers.write(year, node);
+            writers.write(year, line);
             documentCount++;
         }
         return documentCount;
+    }
+
+    private PreparedClusterInput resolvePreparedClusterInput(
+            FileSystem fileSystem, org.apache.hadoop.fs.Path sourceInputPath) throws IOException {
+        List<org.apache.hadoop.fs.Path> directShards = listJsonlInputs(fileSystem, sourceInputPath);
+        if (!directShards.isEmpty() && canReusePreparedClusterInput(fileSystem, sourceInputPath)) {
+            return new PreparedClusterInput(
+                    sourceInputPath,
+                    resolveDocumentCount(fileSystem, sourceInputPath, directShards),
+                    directShards.size());
+        }
+
+        org.apache.hadoop.fs.Path yearsPath = new org.apache.hadoop.fs.Path(sourceInputPath, "years");
+        List<org.apache.hadoop.fs.Path> yearShards = listJsonlInputs(fileSystem, yearsPath);
+        if (!yearShards.isEmpty()) {
+            return new PreparedClusterInput(
+                    yearsPath,
+                    resolveDocumentCount(fileSystem, yearsPath, yearShards),
+                    yearShards.size());
+        }
+        return null;
+    }
+
+    private boolean canReusePreparedClusterInput(FileSystem fileSystem, org.apache.hadoop.fs.Path inputPath)
+            throws IOException {
+        String fileName = inputPath.getName();
+        if ("years".equals(fileName)) {
+            return true;
+        }
+        return readManifestDocumentCount(fileSystem, inputPath) != null;
+    }
+
+    private int resolveDocumentCount(
+            FileSystem fileSystem,
+            org.apache.hadoop.fs.Path inputPath,
+            List<org.apache.hadoop.fs.Path> shards) throws IOException {
+        Integer manifestDocumentCount = readManifestDocumentCount(fileSystem, inputPath);
+        if (manifestDocumentCount != null && manifestDocumentCount >= 0) {
+            return manifestDocumentCount;
+        }
+        return countNonBlankLines(fileSystem, shards);
+    }
+
+    private Integer readManifestDocumentCount(FileSystem fileSystem, org.apache.hadoop.fs.Path inputPath)
+            throws IOException {
+        FileStatus status = fileSystem.getFileStatus(inputPath);
+        ArrayList<org.apache.hadoop.fs.Path> manifestCandidates = new ArrayList<>(2);
+        if (status.isDirectory()) {
+            manifestCandidates.add(new org.apache.hadoop.fs.Path(inputPath, "manifest.json"));
+        }
+        org.apache.hadoop.fs.Path parent = inputPath.getParent();
+        if (parent != null) {
+            manifestCandidates.add(new org.apache.hadoop.fs.Path(parent, "manifest.json"));
+        }
+
+        for (org.apache.hadoop.fs.Path manifestPath : manifestCandidates) {
+            if (!fileSystem.exists(manifestPath)) {
+                continue;
+            }
+            try (var reader = new java.io.InputStreamReader(fileSystem.open(manifestPath), StandardCharsets.UTF_8)) {
+                JsonNode totals = objectMapper.readTree(reader).path("totals");
+                JsonNode records = totals.path("records");
+                if (records.canConvertToInt()) {
+                    return records.asInt();
+                }
+            }
+        }
+        return null;
+    }
+
+    private int countNonBlankLines(FileSystem fileSystem, List<org.apache.hadoop.fs.Path> shards) throws IOException {
+        int documentCount = 0;
+        for (org.apache.hadoop.fs.Path shard : shards) {
+            try (BufferedReader reader = new BufferedReader(
+                    new java.io.InputStreamReader(fileSystem.open(shard), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!line.isBlank()) {
+                        documentCount++;
+                    }
+                }
+            }
+        }
+        return documentCount;
+    }
+
+    private List<org.apache.hadoop.fs.Path> listJsonlInputs(
+            FileSystem fileSystem, org.apache.hadoop.fs.Path inputPath) throws IOException {
+        if (!fileSystem.exists(inputPath)) {
+            return List.of();
+        }
+        FileStatus status = fileSystem.getFileStatus(inputPath);
+        if (status.isFile()) {
+            return status.getPath().getName().endsWith(".jsonl")
+                    ? List.of(status.getPath())
+                    : List.of();
+        }
+
+        FileStatus[] statuses = fileSystem.listStatus(inputPath);
+        ArrayList<org.apache.hadoop.fs.Path> shards = new ArrayList<>();
+        for (FileStatus childStatus : statuses) {
+            if (childStatus.isFile() && childStatus.getPath().getName().endsWith(".jsonl")) {
+                shards.add(childStatus.getPath());
+            }
+        }
+        shards.sort(java.util.Comparator.comparing(org.apache.hadoop.fs.Path::toString));
+        return List.copyOf(shards);
     }
 
     private void runJob(Job job) throws IOException, ClassNotFoundException, InterruptedException {
@@ -344,6 +463,14 @@ public class HadoopProcessingService {
         if (reducerTasks > 0) {
             job.setNumReduceTasks(reducerTasks);
         }
+    }
+
+    private void applyJobJar(Job job) {
+        String configuredJobJar = properties.getJobJar();
+        if (configuredJobJar == null || configuredJobJar.isBlank()) {
+            return;
+        }
+        job.setJar(configuredJobJar);
     }
 
     private int reducerTasksForCluster(StageResult stageResult) {
@@ -397,24 +524,30 @@ public class HadoopProcessingService {
             org.apache.hadoop.fs.Path documentKeywords,
             org.apache.hadoop.fs.Path invertedIndex) {}
 
-    private record StageResult(int documentCount, int inputShardCount, List<String> warnings) {}
+    private record StageResult(
+            org.apache.hadoop.fs.Path inputPath,
+            int documentCount,
+            int inputShardCount,
+            List<String> warnings) {}
+
+    private record PreparedClusterInput(
+            org.apache.hadoop.fs.Path inputPath,
+            int documentCount,
+            int inputShardCount) {}
 
     private static final class StagingWriters implements AutoCloseable {
         private final FileSystem fileSystem;
         private final org.apache.hadoop.fs.Path inputDirectory;
-        private final ObjectMapper objectMapper;
         private final java.util.Map<Integer, BufferedWriter> writers = new java.util.HashMap<>();
 
-        private StagingWriters(
-                FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory, ObjectMapper objectMapper) {
+        private StagingWriters(FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory) {
             this.fileSystem = fileSystem;
             this.inputDirectory = inputDirectory;
-            this.objectMapper = objectMapper;
         }
 
-        private void write(int year, JsonNode node) throws IOException {
+        private void write(int year, String jsonLine) throws IOException {
             BufferedWriter writer = writers.computeIfAbsent(year, this::openWriter);
-            writer.write(objectMapper.writeValueAsString(node));
+            writer.write(jsonLine);
             writer.newLine();
         }
 

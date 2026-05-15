@@ -10,6 +10,7 @@ public class HadoopProperties {
     private String inputPath;
     private String outputPath;
     private int reducerTasks = 4;
+    private String jobJar;
 
     public Mode getMode() {
         return mode;
@@ -49,6 +50,14 @@ public class HadoopProperties {
 
     public void setReducerTasks(int reducerTasks) {
         this.reducerTasks = reducerTasks;
+    }
+
+    public String getJobJar() {
+        return jobJar;
+    }
+
+    public void setJobJar(String jobJar) {
+        this.jobJar = jobJar;
     }
 
     public enum Mode {

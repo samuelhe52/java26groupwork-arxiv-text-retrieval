@@ -386,7 +386,7 @@ public class CorpusIndexService {
             Map<String, PostingAccumulator> postingAccumulators = new HashMap<>();
             forEachFileLine(fileSystem, artifacts.invertedIndexDir(), true, line -> {
                 String[] parts = line.split("\t");
-                if (parts.length < 4) {
+                if (parts.length < 3) {
                     return;
                 }
                 String term = parts[0];
@@ -395,7 +395,7 @@ public class CorpusIndexService {
                 if (ordinal == null) {
                     return;
                 }
-                double score = Double.parseDouble(parts[3]);
+                double score = Double.parseDouble(parts[2]);
                 postingAccumulators
                         .computeIfAbsent(term, ignored -> new PostingAccumulator())
                         .add(ordinal, score);
@@ -503,7 +503,9 @@ public class CorpusIndexService {
                         maxYear = Math.max(maxYear, document.getYear());
 
                         Map<String, Integer> termCounts = new HashMap<>();
-                        for (String token : CorpusTokenizer.tokenize(document.getTitle() + "\n\n" + document.getAbstractText())) {
+                        for (String token : CorpusTokenizer.tokenizeNormalizedParts(
+                                document.getTitle(),
+                                document.getAbstractText())) {
                             termCounts.merge(token, 1, Integer::sum);
                             globalTermFrequency.merge(token, 1, Integer::sum);
                             yearlyTermFrequency.computeIfAbsent(document.getYear(), ignored -> new HashMap<>())
@@ -531,7 +533,8 @@ public class CorpusIndexService {
 
         for (int ordinal = 0; ordinal < documents.size(); ordinal++) {
             Map<String, Integer> termCounts = documentTermFrequencies.get(ordinal);
-            ArrayList<KeywordCandidate> keywordCandidates = new ArrayList<>(termCounts.size());
+            PriorityQueue<KeywordCandidate> topKeywordCandidates =
+                    new PriorityQueue<>(Math.max(1, properties.getDocumentKeywordCount()), CorpusIndexService::compareKeywordCandidates);
             for (Map.Entry<String, Integer> entry : termCounts.entrySet()) {
                 String term = entry.getKey();
                 int termFrequency = entry.getValue();
@@ -541,20 +544,16 @@ public class CorpusIndexService {
                 }
                 double score = (1.0d + Math.log(termFrequency))
                         * (Math.log((documents.size() + 1.0d) / (df + 1.0d)) + 1.0d);
-                keywordCandidates.add(new KeywordCandidate(term, score));
+                collectTopKeywordCandidate(
+                        topKeywordCandidates,
+                        new KeywordCandidate(term, score),
+                        properties.getDocumentKeywordCount());
                 if (df <= maxDocumentFrequency) {
                     postingAccumulators.computeIfAbsent(term, ignored -> new PostingAccumulator())
                             .add(ordinal, score);
                 }
             }
-            keywordCandidates.sort(Comparator.comparingDouble(KeywordCandidate::score).reversed()
-                    .thenComparing(KeywordCandidate::term));
-            documentKeywords.add(keywordCandidates.stream()
-                    .limit(properties.getDocumentKeywordCount())
-                    .map(candidate -> new CorpusResponses.DocumentKeyword(
-                            candidate.term(),
-                            roundScore(candidate.score())))
-                    .toList());
+            documentKeywords.add(freezeKeywordCandidates(topKeywordCandidates));
         }
 
         Map<String, CorpusIndexSnapshot.PostingList> postings = freezePostings(postingAccumulators);
@@ -746,6 +745,46 @@ public class CorpusIndexService {
             return scoreComparison;
         }
         return Integer.compare(left.documentOrdinal(), right.documentOrdinal());
+    }
+
+    private static int compareKeywordCandidates(KeywordCandidate left, KeywordCandidate right) {
+        int scoreComparison = Double.compare(left.score(), right.score());
+        if (scoreComparison != 0) {
+            return scoreComparison;
+        }
+        return right.term().compareTo(left.term());
+    }
+
+    private void collectTopKeywordCandidate(
+            PriorityQueue<KeywordCandidate> topKeywordCandidates,
+            KeywordCandidate candidate,
+            int keywordLimit) {
+        if (keywordLimit <= 0) {
+            return;
+        }
+        if (topKeywordCandidates.size() < keywordLimit) {
+            topKeywordCandidates.offer(candidate);
+            return;
+        }
+        KeywordCandidate smallest = topKeywordCandidates.peek();
+        if (smallest != null && compareKeywordCandidates(candidate, smallest) > 0) {
+            topKeywordCandidates.poll();
+            topKeywordCandidates.offer(candidate);
+        }
+    }
+
+    private List<CorpusResponses.DocumentKeyword> freezeKeywordCandidates(
+            PriorityQueue<KeywordCandidate> topKeywordCandidates) {
+        if (topKeywordCandidates.isEmpty()) {
+            return List.of();
+        }
+        ArrayList<KeywordCandidate> ordered = new ArrayList<>(topKeywordCandidates);
+        ordered.sort((left, right) -> compareKeywordCandidates(right, left));
+        return ordered.stream()
+                .map(candidate -> new CorpusResponses.DocumentKeyword(
+                        candidate.term(),
+                        roundScore(candidate.score())))
+                .toList();
     }
 
     private List<CorpusResponses.CorpusYearSummary> buildYearSummaries(

@@ -1,10 +1,8 @@
 package com.java26groupwork.finalassignment.hadoop.jobs;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
 import java.util.Locale;
+import java.util.PriorityQueue;
 import java.util.StringJoiner;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -43,10 +41,10 @@ public final class DocumentKeywordsJob {
         protected void map(LongWritable key, Text value, Context context)
                 throws IOException, InterruptedException {
             String[] parts = value.toString().split("\t");
-            if (parts.length < 4) {
+            if (parts.length < 3) {
                 return;
             }
-            context.write(new Text(parts[1]), new Text(parts[0] + "\t" + parts[3]));
+            context.write(new Text(parts[1]), new Text(parts[0] + "\t" + parts[2]));
         }
     }
 
@@ -56,21 +54,52 @@ public final class DocumentKeywordsJob {
         protected void reduce(Text documentId, Iterable<Text> values, Context context)
                 throws IOException, InterruptedException {
             int keywordLimit = context.getConfiguration().getInt(KEYWORD_LIMIT_KEY, 8);
-            List<KeywordRow> keywords = new ArrayList<>();
+            PriorityQueue<KeywordRow> keywords =
+                    new PriorityQueue<>(Math.max(1, keywordLimit), DocumentKeywordsJob::compareKeywordRows);
             for (Text value : values) {
                 String[] parts = value.toString().split("\t");
                 if (parts.length < 2) {
                     continue;
                 }
-                keywords.add(new KeywordRow(parts[0], Double.parseDouble(parts[1])));
+                collectTopKeyword(
+                        keywords,
+                        new KeywordRow(parts[0], Double.parseDouble(parts[1])),
+                        keywordLimit);
             }
-            keywords.sort(Comparator.comparingDouble(KeywordRow::getScore).reversed());
+            var orderedKeywords = keywords.stream()
+                    .sorted((left, right) -> compareKeywordRows(right, left))
+                    .toList();
             StringJoiner joiner = new StringJoiner(",");
-            for (int index = 0; index < Math.min(keywordLimit, keywords.size()); index++) {
-                KeywordRow row = keywords.get(index);
+            for (KeywordRow row : orderedKeywords) {
                 joiner.add(row.getTerm() + "|" + String.format(Locale.ROOT, "%.6f", row.getScore()));
             }
             context.write(documentId, new Text(joiner.toString()));
+        }
+    }
+
+    private static int compareKeywordRows(KeywordRow left, KeywordRow right) {
+        int scoreComparison = Double.compare(left.getScore(), right.getScore());
+        if (scoreComparison != 0) {
+            return scoreComparison;
+        }
+        return right.getTerm().compareTo(left.getTerm());
+    }
+
+    private static void collectTopKeyword(
+            PriorityQueue<KeywordRow> keywords,
+            KeywordRow candidate,
+            int keywordLimit) {
+        if (keywordLimit <= 0) {
+            return;
+        }
+        if (keywords.size() < keywordLimit) {
+            keywords.offer(candidate);
+            return;
+        }
+        KeywordRow smallest = keywords.peek();
+        if (smallest != null && compareKeywordRows(candidate, smallest) > 0) {
+            keywords.poll();
+            keywords.offer(candidate);
         }
     }
 
