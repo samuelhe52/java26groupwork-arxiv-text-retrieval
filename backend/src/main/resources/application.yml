@@ -3,8 +3,8 @@ spring:
     name: final-assignment-backend
   servlet:
     multipart:
-      max-file-size: 256MB
-      max-request-size: 256MB
+      max-file-size: 1GB
+      max-request-size: 1GB
 
 server:
   port: 8080

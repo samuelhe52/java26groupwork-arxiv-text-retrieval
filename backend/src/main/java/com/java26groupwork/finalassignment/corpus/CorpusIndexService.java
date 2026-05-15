@@ -2,6 +2,7 @@ package com.java26groupwork.finalassignment.corpus;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -136,7 +137,7 @@ public class CorpusIndexService {
                 importFile(file, yearsDir, warnings, importedRecordCount);
             }
         } catch (IOException exception) {
-            throw new UncheckedIOException("Failed to persist uploaded dataset.", exception);
+            throw new UncheckedIOException(describeUploadImportFailure(exception), exception);
         }
 
         if (importedRecordCount.get() == 0) {
@@ -876,6 +877,22 @@ public class CorpusIndexService {
         } catch (IOException exception) {
             throw new UncheckedIOException("Failed to parse uploaded JSONL in " + filename, exception);
         }
+    }
+
+    private String describeUploadImportFailure(IOException exception) {
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof JsonProcessingException) {
+                String parserMessage = current.getMessage();
+                if (parserMessage == null || parserMessage.isBlank()) {
+                    return "Uploaded JSON is malformed.";
+                }
+                String firstLine = parserMessage.lines().findFirst().orElse(parserMessage).trim();
+                return "Uploaded JSON is malformed: " + firstLine;
+            }
+            current = current.getCause();
+        }
+        return "Failed to persist uploaded dataset.";
     }
 
     private boolean writeUploadedRecord(JsonNode rawNode, UploadWriters writers, List<String> warnings)
