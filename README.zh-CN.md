@@ -78,7 +78,7 @@ export HADOOP_CONF_DIR=/opt/hadoop-3.4.1/etc/hadoop
 make backend-run
 ```
 
-在这个模式下，后端使用 `file:///`，适合先完成 Web/API 逻辑和本地联调。
+在这个模式下，后端会直接读取数据集并在进程内构建 TF-IDF 检索快照，不会再把本地分析流程写成一套 Hadoop 临时产物目录。
 
 ## 集群联调与生产测试
 

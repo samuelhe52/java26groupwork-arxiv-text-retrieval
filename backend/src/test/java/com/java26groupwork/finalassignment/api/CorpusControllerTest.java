@@ -33,8 +33,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class CorpusControllerTest {
 
-    private static Path localHadoopBaseDir;
-
     @Autowired
     private MockMvc mockMvc;
 
@@ -42,10 +40,8 @@ class CorpusControllerTest {
     private CorpusIndexService corpusIndexService;
 
     @DynamicPropertySource
-    static void registerProperties(DynamicPropertyRegistry registry) throws Exception {
-        localHadoopBaseDir = Files.createTempDirectory("hadoop-local-test-");
+    static void registerProperties(DynamicPropertyRegistry registry) {
         registry.add("app.corpus.index-max-document-frequency-ratio", () -> "1.0");
-        registry.add("app.hadoop.local-base-path", () -> localHadoopBaseDir.toString());
     }
 
     @BeforeEach

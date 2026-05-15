@@ -6,10 +6,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class HadoopProperties {
 
     private Mode mode = Mode.LOCAL;
-    private String localBasePath;
     private String configDir;
     private String inputPath;
     private String outputPath;
+    private int reducerTasks = 4;
 
     public Mode getMode() {
         return mode;
@@ -17,14 +17,6 @@ public class HadoopProperties {
 
     public void setMode(Mode mode) {
         this.mode = mode;
-    }
-
-    public String getLocalBasePath() {
-        return localBasePath;
-    }
-
-    public void setLocalBasePath(String localBasePath) {
-        this.localBasePath = localBasePath;
     }
 
     public String getConfigDir() {
@@ -49,6 +41,14 @@ public class HadoopProperties {
 
     public void setOutputPath(String outputPath) {
         this.outputPath = outputPath;
+    }
+
+    public int getReducerTasks() {
+        return reducerTasks;
+    }
+
+    public void setReducerTasks(int reducerTasks) {
+        this.reducerTasks = reducerTasks;
     }
 
     public enum Mode {

@@ -20,7 +20,6 @@ app:
     index-max-document-frequency-ratio: 0.20
   hadoop:
     mode: local
-    local-base-path: ${user.home}/Desktop/hadoop/local-dev
     config-dir: ${HADOOP_CONF_DIR:${HADOOP_HOME:${user.home}/hadoop}/etc/hadoop}
-    input-path: /datasets/arxiv-cs-lg-2015-now-primary-cs-only/years
+    input-path: ../datasets/arxiv-cs-lg-2015-now-primary-cs-only
     output-path: /datasets/output

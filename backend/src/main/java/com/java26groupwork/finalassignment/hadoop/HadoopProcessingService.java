@@ -46,23 +46,36 @@ public class HadoopProcessingService {
 
     public String describe() {
         return properties.getMode() == HadoopProperties.Mode.LOCAL
-                ? "local-mapreduce-pipeline"
+                ? "local-direct-indexer"
                 : "hdfs-yarn-mapreduce-pipeline";
+    }
+
+    public boolean isLocalMode() {
+        return properties.getMode() == HadoopProperties.Mode.LOCAL;
     }
 
     public HadoopConnectionDescription describeConnection() {
         return new HadoopConnectionDescription(
                 properties.getMode().name().toLowerCase(),
-                hadoopConfiguration.get("fs.defaultFS"),
-                hadoopConfiguration.get("dfs.nameservices"),
-                hadoopConfiguration.get("yarn.resourcemanager.cluster-id"),
+                properties.getMode() == HadoopProperties.Mode.LOCAL
+                        ? "local-direct"
+                        : hadoopConfiguration.get("fs.defaultFS"),
+                properties.getMode() == HadoopProperties.Mode.LOCAL
+                        ? null
+                        : hadoopConfiguration.get("dfs.nameservices"),
+                properties.getMode() == HadoopProperties.Mode.LOCAL
+                        ? null
+                        : hadoopConfiguration.get("yarn.resourcemanager.cluster-id"),
                 properties.getInputPath(),
                 properties.getOutputPath(),
-                properties.getLocalBasePath(),
-                properties.getConfigDir());
+                properties.getConfigDir(),
+                properties.getReducerTasks());
     }
 
     public ProcessingArtifacts processDataset(Path sourceDatasetDir, CorpusProperties corpusProperties) {
+        if (isLocalMode()) {
+            throw new IllegalStateException("Cluster Hadoop processing is not used in local mode.");
+        }
         long startNanos = System.nanoTime();
         Instant startedAt = Instant.now();
         org.apache.hadoop.conf.Configuration configuration = new org.apache.hadoop.conf.Configuration(hadoopConfiguration);
@@ -91,23 +104,43 @@ public class HadoopProcessingService {
                         List.copyOf(stageResult.warnings()));
             }
 
-            runJob(TermFrequencyJob.createJob(new org.apache.hadoop.conf.Configuration(configuration),
-                    workPaths.input(), workPaths.termFrequency()));
-            runJob(DocumentFrequencyJob.createJob(new org.apache.hadoop.conf.Configuration(configuration),
-                    workPaths.input(), workPaths.documentFrequency()));
+            int reducerTasks = reducerTasksForCluster(stageResult);
+
+            Job termFrequencyJob = TermFrequencyJob.createJob(
+                    new org.apache.hadoop.conf.Configuration(configuration),
+                    workPaths.input(),
+                    workPaths.termFrequency());
+            applyReducerTasks(termFrequencyJob, reducerTasks);
+            runJob(termFrequencyJob);
+
+            Job documentFrequencyJob = DocumentFrequencyJob.createJob(
+                    new org.apache.hadoop.conf.Configuration(configuration),
+                    workPaths.input(),
+                    workPaths.documentFrequency());
+            applyReducerTasks(documentFrequencyJob, reducerTasks);
+            runJob(documentFrequencyJob);
 
             org.apache.hadoop.conf.Configuration tfIdfConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
             tfIdfConfiguration.setInt(TfIdfJob.DOCUMENT_COUNT_KEY, stageResult.documentCount());
-            runJob(TfIdfJob.createJob(
-                    tfIdfConfiguration, workPaths.termFrequency(), workPaths.documentFrequency(), workPaths.tfIdf()));
+            Job tfIdfJob = TfIdfJob.createJob(
+                    tfIdfConfiguration,
+                    workPaths.termFrequency(),
+                    workPaths.documentFrequency(),
+                    workPaths.tfIdf());
+            applyReducerTasks(tfIdfJob, reducerTasks);
+            runJob(tfIdfJob);
 
             org.apache.hadoop.conf.Configuration keywordsConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
             keywordsConfiguration.setInt(
                     DocumentKeywordsJob.KEYWORD_LIMIT_KEY, corpusProperties.getDocumentKeywordCount());
-            runJob(DocumentKeywordsJob.createJob(
-                    keywordsConfiguration, workPaths.tfIdf(), workPaths.documentKeywords()));
+            Job documentKeywordsJob = DocumentKeywordsJob.createJob(
+                    keywordsConfiguration,
+                    workPaths.tfIdf(),
+                    workPaths.documentKeywords());
+            applyReducerTasks(documentKeywordsJob, reducerTasks);
+            runJob(documentKeywordsJob);
 
             org.apache.hadoop.conf.Configuration invertedIndexConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
@@ -115,11 +148,13 @@ public class HadoopProcessingService {
             invertedIndexConfiguration.setDouble(
                     InvertedIndexJob.MAX_DOCUMENT_FREQUENCY_RATIO_KEY,
                     corpusProperties.getIndexMaxDocumentFrequencyRatio());
-            runJob(InvertedIndexJob.createJob(
+            Job invertedIndexJob = InvertedIndexJob.createJob(
                     invertedIndexConfiguration,
                     workPaths.tfIdf(),
                     workPaths.documentFrequency(),
-                    workPaths.invertedIndex()));
+                    workPaths.invertedIndex());
+            applyReducerTasks(invertedIndexJob, reducerTasks);
+            runJob(invertedIndexJob);
 
             return new ProcessingArtifacts(
                     sourceDatasetDir.toAbsolutePath().normalize(),
@@ -148,28 +183,33 @@ public class HadoopProcessingService {
         if (configuredInputPath == null || configuredInputPath.isBlank()) {
             return null;
         }
-        return Path.of(configuredInputPath).normalize();
+        Path configuredPath = Path.of(configuredInputPath);
+        if (!configuredPath.isAbsolute()) {
+            configuredPath = Path.of("").toAbsolutePath().resolve(configuredPath);
+        }
+        configuredPath = configuredPath.normalize();
+        if (isLocalMode()) {
+            return normalizeLocalDatasetDir(configuredPath);
+        }
+        return configuredPath;
+    }
+
+    private Path normalizeLocalDatasetDir(Path configuredPath) {
+        Path fileName = configuredPath.getFileName();
+        if (fileName == null || !"years".equals(fileName.toString())) {
+            return configuredPath;
+        }
+
+        Path parent = configuredPath.getParent();
+        if (parent == null) {
+            return configuredPath;
+        }
+
+        return Files.isDirectory(parent) ? parent : configuredPath;
     }
 
     private WorkPaths createWorkPaths(Path sourceDatasetDir) {
         String runId = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(java.time.LocalDateTime.now());
-        if (properties.getMode() == HadoopProperties.Mode.LOCAL) {
-            Path localRoot = Path.of(properties.getLocalBasePath())
-                    .resolve("analyses")
-                    .resolve(sourceDatasetDir.getFileName() + "-" + runId)
-                    .toAbsolutePath()
-                    .normalize();
-            org.apache.hadoop.fs.Path root = new org.apache.hadoop.fs.Path(localRoot.toUri().toString());
-            return new WorkPaths(
-                    root,
-                    new org.apache.hadoop.fs.Path(root, "input"),
-                    new org.apache.hadoop.fs.Path(root, "tf"),
-                    new org.apache.hadoop.fs.Path(root, "df"),
-                    new org.apache.hadoop.fs.Path(root, "tfidf"),
-                    new org.apache.hadoop.fs.Path(root, "keywords"),
-                    new org.apache.hadoop.fs.Path(root, "index"));
-        }
-
         org.apache.hadoop.fs.Path root = new org.apache.hadoop.fs.Path(
                 new org.apache.hadoop.fs.Path(properties.getOutputPath()),
                 "analysis-" + runId);
@@ -224,9 +264,9 @@ public class HadoopProcessingService {
                     documentCount += stageRecords(reader, writers, warnings, seenDocumentIds);
                 }
             }
-        }
 
-        return new StageResult(documentCount, limitWarnings(warnings));
+            return new StageResult(documentCount, shards.size(), limitWarnings(warnings));
+        }
     }
 
     private StageResult stageClusterDataset(FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory)
@@ -261,9 +301,9 @@ public class HadoopProcessingService {
                     documentCount += stageRecords(reader, writers, warnings, seenDocumentIds);
                 }
             }
-        }
 
-        return new StageResult(documentCount, limitWarnings(warnings));
+            return new StageResult(documentCount, shards.size(), limitWarnings(warnings));
+        }
     }
 
     private int stageRecords(
@@ -298,6 +338,21 @@ public class HadoopProcessingService {
         if (!job.waitForCompletion(true)) {
             throw new IllegalStateException("Hadoop job failed: " + job.getJobName());
         }
+    }
+
+    private void applyReducerTasks(Job job, int reducerTasks) {
+        if (reducerTasks > 0) {
+            job.setNumReduceTasks(reducerTasks);
+        }
+    }
+
+    private int reducerTasksForCluster(StageResult stageResult) {
+        if (properties.getMode() != HadoopProperties.Mode.CLUSTER) {
+            return 1;
+        }
+        int configuredReducers = Math.max(1, properties.getReducerTasks());
+        int shardBound = Math.max(1, stageResult.inputShardCount());
+        return Math.min(configuredReducers, shardBound);
     }
 
     private void deleteIfExists(FileSystem fileSystem, org.apache.hadoop.fs.Path path) throws IOException {
@@ -342,7 +397,7 @@ public class HadoopProcessingService {
             org.apache.hadoop.fs.Path documentKeywords,
             org.apache.hadoop.fs.Path invertedIndex) {}
 
-    private record StageResult(int documentCount, List<String> warnings) {}
+    private record StageResult(int documentCount, int inputShardCount, List<String> warnings) {}
 
     private static final class StagingWriters implements AutoCloseable {
         private final FileSystem fileSystem;
