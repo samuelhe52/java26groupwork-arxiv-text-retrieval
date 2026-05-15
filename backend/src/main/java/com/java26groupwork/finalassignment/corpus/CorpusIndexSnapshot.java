@@ -1,6 +1,7 @@
 package com.java26groupwork.finalassignment.corpus;
 
 import java.time.Instant;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -63,7 +64,7 @@ final class CorpusIndexSnapshot {
 
     static CorpusIndexSnapshot empty(String datasetDir, String status, List<String> warnings) {
         CorpusResponses.CorpusBuildSummary buildSummary = new CorpusResponses.CorpusBuildSummary(
-                "empty",
+                status,
                 datasetDir,
                 Instant.now(),
                 0L,
@@ -75,7 +76,7 @@ final class CorpusIndexSnapshot {
         return new CorpusIndexSnapshot(
                 false,
                 status,
-                "",
+                datasetName(datasetDir),
                 datasetDir,
                 warnings,
                 List.of(),
@@ -90,6 +91,16 @@ final class CorpusIndexSnapshot {
                 buildSummary.getBuiltAt(),
                 0,
                 0);
+    }
+
+    private static String datasetName(String datasetDir) {
+        try {
+            Path path = Path.of(datasetDir);
+            Path fileName = path.getFileName();
+            return fileName == null ? datasetDir : fileName.toString();
+        } catch (RuntimeException exception) {
+            return datasetDir;
+        }
     }
 
     long recordCount() {

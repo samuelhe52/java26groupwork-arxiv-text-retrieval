@@ -1,10 +1,12 @@
 package com.java26groupwork.finalassignment.corpus;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import jakarta.annotation.PostConstruct;
+import com.java26groupwork.finalassignment.hadoop.HadoopProcessingService;
 import jakarta.annotation.PreDestroy;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -23,6 +25,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
@@ -30,14 +33,20 @@ import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 @Service
 public class CorpusIndexService {
 
+    private static final List<String> WRAPPED_RECORD_FIELDS =
+            List.of("data", "records", "papers", "items", "documents");
+
     private final CorpusProperties properties;
     private final ObjectMapper objectMapper;
+    private final HadoopProcessingService hadoopProcessingService;
     private final ExecutorService reloadExecutor;
     private volatile Path activeDatasetDir;
     private volatile CorpusIndexSnapshot snapshot;
@@ -45,31 +54,33 @@ public class CorpusIndexService {
     private volatile Instant reloadRequestedAt;
     private volatile String lastReloadError;
 
-    public CorpusIndexService(CorpusProperties properties, ObjectMapper objectMapper) {
+    public CorpusIndexService(
+            CorpusProperties properties,
+            ObjectMapper objectMapper,
+            HadoopProcessingService hadoopProcessingService) {
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.hadoopProcessingService = hadoopProcessingService;
         this.reloadExecutor = Executors.newSingleThreadExecutor(task -> {
             Thread thread = new Thread(task, "corpus-index-reload");
             thread.setDaemon(true);
             return thread;
         });
         this.activeDatasetDir = resolvePath(properties.getDatasetDir());
-        this.snapshot = CorpusIndexSnapshot.empty(activeDatasetDir.toString(), "not-loaded", List.of());
-    }
-
-    @PostConstruct
-    public void initialize() {
-        if (properties.isAutoLoad()) {
-            requestReload();
-        }
+        this.snapshot = CorpusIndexSnapshot.empty(activeDatasetDir.toString(), "not-analyzed", List.of());
     }
 
     public synchronized CorpusResponses.CorpusBuildSummary reload() {
-        this.snapshot = buildSnapshot();
-        this.reloadInProgress = false;
-        this.reloadRequestedAt = null;
-        this.lastReloadError = null;
-        return snapshot.buildSummary;
+        try {
+            HadoopProcessingService.ProcessingArtifacts artifacts =
+                    hadoopProcessingService.processDataset(activeDatasetDir, properties);
+            this.snapshot = buildSnapshot(artifacts);
+            this.lastReloadError = null;
+            return snapshot.buildSummary;
+        } finally {
+            this.reloadInProgress = false;
+            this.reloadRequestedAt = null;
+        }
     }
 
     public synchronized CorpusResponses.CorpusBuildSummary requestReload() {
@@ -96,7 +107,7 @@ public class CorpusIndexService {
 
     public synchronized CorpusResponses.CorpusUploadResponse importUploadedCorpus(List<MultipartFile> files) {
         if (reloadInProgress) {
-            throw new IllegalArgumentException("A corpus rebuild is already running. Wait for it to finish first.");
+            throw new IllegalArgumentException("An analysis job is already running. Wait for it to finish first.");
         }
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("Choose at least one .json or .jsonl file.");
@@ -131,14 +142,21 @@ public class CorpusIndexService {
         }
 
         activeDatasetDir = uploadDatasetDir;
-        CorpusResponses.CorpusBuildSummary build = requestReload();
+        reloadInProgress = false;
+        reloadRequestedAt = null;
+        lastReloadError = null;
+        snapshot = CorpusIndexSnapshot.empty(
+                uploadDatasetDir.toString(),
+                "staged",
+                limitWarnings(warnings));
+        CorpusResponses.CorpusBuildSummary build = buildSummary();
         return new CorpusResponses.CorpusUploadResponse(
                 build.getStatus(),
                 uploadDatasetDir.toString(),
                 nonEmptyFiles.size(),
                 importedRecordCount.get(),
                 List.copyOf(uploadedFiles),
-                List.copyOf(warnings),
+                limitWarnings(warnings),
                 build);
     }
 
@@ -163,10 +181,13 @@ public class CorpusIndexService {
     public CorpusResponses.CorpusBuildSummary buildSummary() {
         CorpusIndexSnapshot current = snapshot;
         if (reloadInProgress) {
-            return buildTransientSummary(current, "reloading", "Reload in progress; serving the previous index.");
+            String message = current.ready
+                    ? "Analysis is running; serving the previous index until the new build finishes."
+                    : "Analysis is running for the selected dataset.";
+            return buildTransientSummary(current, "reloading", message);
         }
         if (lastReloadError != null && !lastReloadError.isBlank()) {
-            return buildTransientSummary(current, "reload-failed", "Last reload failed: " + lastReloadError);
+            return buildTransientSummary(current, "reload-failed", "Last analysis failed: " + lastReloadError);
         }
         return current.buildSummary;
     }
@@ -176,7 +197,7 @@ public class CorpusIndexService {
         CorpusResponses.CorpusBuildSummary build = buildSummary();
         return new CorpusResponses.CorpusOverviewResponse(
                 current.ready,
-                "local-index",
+                "hadoop-pipeline",
                 current.datasetName,
                 current.datasetDir,
                 build.getStatus(),
@@ -199,6 +220,7 @@ public class CorpusIndexService {
         List<String> warnings = new ArrayList<>(current.warnings);
 
         if (!current.ready) {
+            warnings.add("Upload a dataset and submit analysis before searching.");
             return new CorpusResponses.CorpusSearchResponse(
                     false,
                     query == null ? "" : query,
@@ -206,7 +228,7 @@ public class CorpusIndexService {
                     limit,
                     0L,
                     elapsedMillis(start),
-                    warnings,
+                    List.copyOf(warnings),
                     List.of());
         }
 
@@ -219,7 +241,7 @@ public class CorpusIndexService {
                     limit,
                     0L,
                     elapsedMillis(start),
-                    warnings,
+                    List.copyOf(warnings),
                     List.of());
         }
 
@@ -259,7 +281,7 @@ public class CorpusIndexService {
                 limit,
                 scores.size(),
                 elapsedMillis(start),
-                warnings,
+                List.copyOf(warnings),
                 results);
     }
 
@@ -277,6 +299,211 @@ public class CorpusIndexService {
                 "ok",
                 current.documents.get(ordinal),
                 current.documentKeywords.get(ordinal));
+    }
+
+    private CorpusIndexSnapshot buildSnapshot(HadoopProcessingService.ProcessingArtifacts artifacts) {
+        if (artifacts.documentCount() <= 0) {
+            return CorpusIndexSnapshot.empty(activeDatasetDir.toString(), "empty-dataset", artifacts.warnings());
+        }
+
+        long startNanos = System.nanoTime();
+        List<String> warnings = new ArrayList<>(artifacts.warnings());
+
+        try {
+            FileSystem fileSystem = hadoopProcessingService.fileSystem();
+            List<StoredDocument> documents = new ArrayList<>();
+            Map<String, Integer> documentOrdinalsById = new HashMap<>();
+            Map<String, Integer> primaryCategoryCounts = new HashMap<>();
+            Map<String, Integer> documentYears = new HashMap<>();
+
+            int[] minYear = {Integer.MAX_VALUE};
+            int[] maxYear = {Integer.MIN_VALUE};
+
+            forEachFileLine(fileSystem, artifacts.stagedInputDir(), false, line -> {
+                JsonNode node = objectMapper.readTree(line);
+                String documentId = CorpusTokenizer.normalize(node.path("id").asText(""));
+                if (documentId.isBlank()) {
+                    warnings.add("Skipped a staged record with blank id while building the search snapshot.");
+                    return;
+                }
+                if (documentOrdinalsById.containsKey(documentId)) {
+                    warnings.add("Skipped a duplicate staged id while building the search snapshot: " + documentId);
+                    return;
+                }
+                StoredDocument document = toDocument(node, documents.size());
+                documents.add(document);
+                documentOrdinalsById.put(documentId, document.getOrdinal());
+                documentYears.put(documentId, document.getYear());
+                minYear[0] = Math.min(minYear[0], document.getYear());
+                maxYear[0] = Math.max(maxYear[0], document.getYear());
+                primaryCategoryCounts.merge(document.getPrimaryCategory(), 1, Integer::sum);
+            });
+
+            Map<String, Integer> documentFrequency = new HashMap<>();
+            forEachFileLine(fileSystem, artifacts.documentFrequencyDir(), true, line -> {
+                String[] parts = line.split("\t");
+                if (parts.length >= 2) {
+                    documentFrequency.put(parts[0], Integer.parseInt(parts[1]));
+                }
+            });
+
+            Map<String, List<CorpusResponses.DocumentKeyword>> documentKeywordsById = new HashMap<>();
+            forEachFileLine(fileSystem, artifacts.documentKeywordsDir(), true, line -> {
+                String[] parts = line.split("\t", 2);
+                if (parts.length < 2) {
+                    return;
+                }
+                documentKeywordsById.put(parts[0], parseKeywordList(parts[1]));
+            });
+
+            Map<String, Integer> globalTermFrequency = new HashMap<>();
+            Map<Integer, Map<String, Integer>> yearlyTermFrequency = new TreeMap<>();
+            Map<Integer, Integer> yearlyTokenTotals = new TreeMap<>();
+            Map<Integer, Integer> yearlyCounts = new TreeMap<>();
+            for (StoredDocument document : documents) {
+                yearlyCounts.merge(document.getYear(), 1, Integer::sum);
+            }
+
+            forEachFileLine(fileSystem, artifacts.termFrequencyDir(), true, line -> {
+                String[] parts = line.split("\t");
+                if (parts.length < 3) {
+                    return;
+                }
+                String documentId = parts[0];
+                String term = parts[1];
+                int termFrequency = Integer.parseInt(parts[2]);
+                Integer year = documentYears.get(documentId);
+                if (year == null) {
+                    return;
+                }
+                globalTermFrequency.merge(term, termFrequency, Integer::sum);
+                yearlyTermFrequency.computeIfAbsent(year, ignored -> new HashMap<>())
+                        .merge(term, termFrequency, Integer::sum);
+                yearlyTokenTotals.merge(year, termFrequency, Integer::sum);
+            });
+
+            Map<String, PostingAccumulator> postingAccumulators = new HashMap<>();
+            forEachFileLine(fileSystem, artifacts.invertedIndexDir(), true, line -> {
+                String[] parts = line.split("\t");
+                if (parts.length < 4) {
+                    return;
+                }
+                String term = parts[0];
+                String documentId = parts[1];
+                Integer ordinal = documentOrdinalsById.get(documentId);
+                if (ordinal == null) {
+                    return;
+                }
+                double score = Double.parseDouble(parts[3]);
+                postingAccumulators
+                        .computeIfAbsent(term, ignored -> new PostingAccumulator())
+                        .add(ordinal, score);
+            });
+
+            List<List<CorpusResponses.DocumentKeyword>> documentKeywords = new ArrayList<>(documents.size());
+            for (StoredDocument document : documents) {
+                documentKeywords.add(documentKeywordsById.getOrDefault(document.getId(), List.of()));
+            }
+
+            Map<String, CorpusIndexSnapshot.PostingList> postings = freezePostings(postingAccumulators);
+            long indexedPostingCount = postingAccumulators.values().stream()
+                    .mapToLong(PostingAccumulator::size)
+                    .sum();
+
+            List<CorpusResponses.CorpusYearSummary> yearSummaries = buildYearSummaries(
+                    yearlyCounts,
+                    yearlyTermFrequency,
+                    yearlyTokenTotals,
+                    globalTermFrequency,
+                    properties.getYearKeywordSince(),
+                    properties.getYearKeywordCount(),
+                    properties.getYearKeywordMinCount());
+
+            List<CorpusResponses.NamedCount> topCategories = topCounts(primaryCategoryCounts, 12);
+            List<CorpusResponses.NamedCount> topTerms = topCounts(globalTermFrequency, 20);
+            long buildMillis = artifacts.buildMillis() + elapsedMillis(startNanos);
+
+            CorpusResponses.CorpusBuildSummary buildSummary = new CorpusResponses.CorpusBuildSummary(
+                    "ready",
+                    activeDatasetDir.toString(),
+                    artifacts.builtAt(),
+                    buildMillis,
+                    documents.size(),
+                    globalTermFrequency.size(),
+                    postings.size(),
+                    indexedPostingCount,
+                    limitWarnings(warnings));
+
+            return new CorpusIndexSnapshot(
+                    true,
+                    "ready",
+                    activeDatasetDir.getFileName() == null ? activeDatasetDir.toString() : activeDatasetDir.getFileName().toString(),
+                    activeDatasetDir.toString(),
+                    limitWarnings(warnings),
+                    List.copyOf(documents),
+                    Map.copyOf(documentOrdinalsById),
+                    Map.copyOf(documentFrequency),
+                    Map.copyOf(postings),
+                    List.copyOf(documentKeywords),
+                    topCategories,
+                    topTerms,
+                    yearSummaries,
+                    buildSummary,
+                    artifacts.builtAt(),
+                    minYear[0] == Integer.MAX_VALUE ? 0 : minYear[0],
+                    maxYear[0] == Integer.MIN_VALUE ? 0 : maxYear[0]);
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to read Hadoop processing outputs.", exception);
+        }
+    }
+
+    private void forEachFileLine(
+            FileSystem fileSystem,
+            org.apache.hadoop.fs.Path directory,
+            boolean outputPartFilesOnly,
+            LineConsumer consumer) throws IOException {
+        FileStatus[] statuses = fileSystem.listStatus(directory);
+        ArrayList<org.apache.hadoop.fs.Path> files = new ArrayList<>();
+        for (FileStatus status : statuses) {
+            if (!status.isFile()) {
+                continue;
+            }
+            if (outputPartFilesOnly && !status.getPath().getName().startsWith("part-")) {
+                continue;
+            }
+            files.add(status.getPath());
+        }
+        files.sort(Comparator.comparing(org.apache.hadoop.fs.Path::toString));
+
+        for (org.apache.hadoop.fs.Path file : files) {
+            try (BufferedReader reader =
+                    new BufferedReader(new InputStreamReader(fileSystem.open(file), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isBlank()) {
+                        continue;
+                    }
+                    consumer.accept(line);
+                }
+            }
+        }
+    }
+
+    private List<CorpusResponses.DocumentKeyword> parseKeywordList(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        ArrayList<CorpusResponses.DocumentKeyword> keywords = new ArrayList<>();
+        for (String part : raw.split(",")) {
+            String[] segments = part.split("\\|");
+            if (segments.length < 2) {
+                continue;
+            }
+            keywords.add(new CorpusResponses.DocumentKeyword(
+                    segments[0],
+                    roundScore(Double.parseDouble(segments[1]))));
+        }
+        return List.copyOf(keywords);
     }
 
     private CorpusResponses.CorpusSearchResult toSearchResult(
@@ -316,7 +543,7 @@ public class CorpusIndexService {
                 current.buildSummary.getVocabularySize(),
                 current.buildSummary.getIndexedTermCount(),
                 current.buildSummary.getIndexedPostingCount(),
-                List.copyOf(warnings));
+                limitWarnings(warnings));
     }
 
     private List<String> distinctTerms(List<String> terms) {
@@ -355,179 +582,6 @@ public class CorpusIndexService {
         return Integer.compare(left.documentOrdinal(), right.documentOrdinal());
     }
 
-    private List<String> tokenizeDocument(StoredDocument document) {
-        return CorpusTokenizer.tokenize(document.getTitle() + "\n\n" + document.getAbstractText());
-    }
-
-    private CorpusIndexSnapshot buildSnapshot() {
-        Instant builtAt = Instant.now();
-        long startNanos = System.nanoTime();
-        Path datasetDir = activeDatasetDir;
-        List<String> warnings = new ArrayList<>();
-
-        if (!Files.isDirectory(datasetDir)) {
-            warnings.add("Dataset directory does not exist: " + datasetDir);
-            return CorpusIndexSnapshot.empty(datasetDir.toString(), "dataset-missing", List.copyOf(warnings));
-        }
-
-        Path yearsDir = datasetDir.resolve("years");
-        if (!Files.isDirectory(yearsDir)) {
-            warnings.add("Dataset years directory does not exist: " + yearsDir);
-            return CorpusIndexSnapshot.empty(datasetDir.toString(), "years-missing", List.copyOf(warnings));
-        }
-
-        List<Path> shards = listShards(yearsDir);
-        if (shards.isEmpty()) {
-            warnings.add("No JSONL shards found in: " + yearsDir);
-            return CorpusIndexSnapshot.empty(datasetDir.toString(), "empty-dataset", List.copyOf(warnings));
-        }
-
-        List<StoredDocument> documents = new ArrayList<>();
-        Map<String, Integer> documentOrdinalsById = new HashMap<>();
-        Map<String, Integer> globalTermFrequency = new HashMap<>();
-        Map<String, Integer> documentFrequency = new HashMap<>();
-        Map<Integer, Integer> yearlyCounts = new TreeMap<>();
-        Map<Integer, Map<String, Integer>> yearlyTermFrequency = new TreeMap<>();
-        Map<Integer, Integer> yearlyTokenTotals = new TreeMap<>();
-        Map<String, Integer> primaryCategoryCounts = new HashMap<>();
-
-        int[] minYear = {Integer.MAX_VALUE};
-        int[] maxYear = {Integer.MIN_VALUE};
-
-        for (Path shard : shards) {
-            forEachRecord(shard, node -> {
-                StoredDocument document = toDocument(node, documents.size());
-                documents.add(document);
-                documentOrdinalsById.put(document.getId(), document.getOrdinal());
-
-                minYear[0] = Math.min(minYear[0], document.getYear());
-                maxYear[0] = Math.max(maxYear[0], document.getYear());
-                yearlyCounts.merge(document.getYear(), 1, Integer::sum);
-                primaryCategoryCounts.merge(document.getPrimaryCategory(), 1, Integer::sum);
-
-                List<String> tokens = tokenizeDocument(document);
-                Set<String> uniqueTerms = new HashSet<>();
-                Map<String, Integer> yearTerms =
-                        yearlyTermFrequency.computeIfAbsent(document.getYear(), ignored -> new HashMap<>());
-                yearlyTokenTotals.merge(document.getYear(), tokens.size(), Integer::sum);
-
-                for (String token : tokens) {
-                    globalTermFrequency.merge(token, 1, Integer::sum);
-                    yearTerms.merge(token, 1, Integer::sum);
-                    uniqueTerms.add(token);
-                }
-                for (String token : uniqueTerms) {
-                    documentFrequency.merge(token, 1, Integer::sum);
-                }
-            });
-        }
-
-        int documentCount = documents.size();
-        double maxDocumentFrequency = documentCount * properties.getIndexMaxDocumentFrequencyRatio();
-        Map<String, PostingAccumulator> postingAccumulators = new HashMap<>();
-        List<List<CorpusResponses.DocumentKeyword>> documentKeywords = new ArrayList<>(documentCount);
-
-        for (StoredDocument document : documents) {
-            List<String> tokens = tokenizeDocument(document);
-            Map<String, Integer> termCounts = new HashMap<>();
-            for (String token : tokens) {
-                termCounts.merge(token, 1, Integer::sum);
-            }
-
-            PriorityQueue<KeywordCandidate> topKeywords =
-                    new PriorityQueue<>(Comparator.comparingDouble(KeywordCandidate::getScore));
-
-            for (Map.Entry<String, Integer> entry : termCounts.entrySet()) {
-                String term = entry.getKey();
-                int tf = entry.getValue();
-                int df = documentFrequency.getOrDefault(term, 0);
-                if (df == 0) {
-                    continue;
-                }
-                double idf = Math.log((documentCount + 1.0d) / (df + 1.0d)) + 1.0d;
-                double tfIdf = (1.0d + Math.log(tf)) * idf;
-
-                if (df <= maxDocumentFrequency) {
-                    postingAccumulators
-                            .computeIfAbsent(term, ignored -> new PostingAccumulator())
-                            .add(document.getOrdinal(), tfIdf);
-                }
-
-                topKeywords.offer(new KeywordCandidate(term, tfIdf));
-                if (topKeywords.size() > properties.getDocumentKeywordCount()) {
-                    topKeywords.poll();
-                }
-            }
-
-            ArrayList<CorpusResponses.DocumentKeyword> orderedKeywords = new ArrayList<>(topKeywords.size());
-            while (!topKeywords.isEmpty()) {
-                KeywordCandidate candidate = topKeywords.poll();
-                orderedKeywords.add(
-                        new CorpusResponses.DocumentKeyword(candidate.getTerm(), roundScore(candidate.getScore())));
-            }
-            orderedKeywords.sort(
-                    Comparator.comparingDouble(CorpusResponses.DocumentKeyword::getScore).reversed());
-            documentKeywords.add(List.copyOf(orderedKeywords));
-        }
-
-        Map<String, CorpusIndexSnapshot.PostingList> postings = freezePostings(postingAccumulators);
-        long indexedPostingCount = postingAccumulators.values().stream()
-                .mapToLong(PostingAccumulator::size)
-                .sum();
-
-        List<CorpusResponses.CorpusYearSummary> yearSummaries = buildYearSummaries(
-                yearlyCounts,
-                yearlyTermFrequency,
-                yearlyTokenTotals,
-                globalTermFrequency,
-                properties.getYearKeywordSince(),
-                properties.getYearKeywordCount(),
-                properties.getYearKeywordMinCount());
-
-        List<CorpusResponses.NamedCount> topCategories = topCounts(primaryCategoryCounts, 12);
-        List<CorpusResponses.NamedCount> topTerms = topCounts(globalTermFrequency, 20);
-
-        long buildMillis = elapsedMillis(startNanos);
-        CorpusResponses.CorpusBuildSummary buildSummary = new CorpusResponses.CorpusBuildSummary(
-                "ready",
-                datasetDir.toString(),
-                builtAt,
-                buildMillis,
-                documentCount,
-                globalTermFrequency.size(),
-                postings.size(),
-                indexedPostingCount,
-                List.copyOf(warnings));
-
-        return new CorpusIndexSnapshot(
-                true,
-                "ready",
-                datasetDir.getFileName().toString(),
-                datasetDir.toString(),
-                List.copyOf(warnings),
-                List.copyOf(documents),
-                Map.copyOf(documentOrdinalsById),
-                Map.copyOf(documentFrequency),
-                Map.copyOf(postings),
-                List.copyOf(documentKeywords),
-                topCategories,
-                topTerms,
-                yearSummaries,
-                buildSummary,
-                builtAt,
-                minYear[0] == Integer.MAX_VALUE ? 0 : minYear[0],
-                maxYear[0] == Integer.MIN_VALUE ? 0 : maxYear[0]);
-    }
-
-    private Map<String, CorpusIndexSnapshot.PostingList> freezePostings(
-            Map<String, PostingAccumulator> postingAccumulators) {
-        Map<String, CorpusIndexSnapshot.PostingList> postings = new HashMap<>(postingAccumulators.size());
-        for (Map.Entry<String, PostingAccumulator> entry : postingAccumulators.entrySet()) {
-            postings.put(entry.getKey(), entry.getValue().freeze());
-        }
-        return postings;
-    }
-
     private List<CorpusResponses.CorpusYearSummary> buildYearSummaries(
             Map<Integer, Integer> yearlyCounts,
             Map<Integer, Map<String, Integer>> yearlyTermFrequency,
@@ -555,12 +609,12 @@ public class CorpusIndexService {
                                         ((entry.getValue() + 1.0d) / yearTokenTotal)
                                                 / ((globalTermFrequency.getOrDefault(entry.getKey(), 0) + 1.0d)
                                                         / globalTokenTotal))))
-                        .sorted(Comparator.comparingDouble(KeywordCandidate::getScore).reversed()
-                                .thenComparing(KeywordCandidate::getTerm))
+                        .sorted(Comparator.comparingDouble(KeywordCandidate::score).reversed()
+                                .thenComparing(KeywordCandidate::term))
                         .limit(keywordCount)
                         .map(candidate -> new CorpusResponses.DocumentKeyword(
-                                candidate.getTerm(),
-                                roundScore(candidate.getScore())))
+                                candidate.term(),
+                                roundScore(candidate.score())))
                         .toList();
 
                 if (!primaryKeywords.isEmpty()) {
@@ -573,12 +627,12 @@ public class CorpusIndexService {
                                             ((entry.getValue() + 1.0d) / yearTokenTotal)
                                                     / ((globalTermFrequency.getOrDefault(entry.getKey(), 0) + 1.0d)
                                                             / globalTokenTotal))))
-                            .sorted(Comparator.comparingDouble(KeywordCandidate::getScore).reversed()
-                                    .thenComparing(KeywordCandidate::getTerm))
+                            .sorted(Comparator.comparingDouble(KeywordCandidate::score).reversed()
+                                    .thenComparing(KeywordCandidate::term))
                             .limit(keywordCount)
                             .map(candidate -> new CorpusResponses.DocumentKeyword(
-                                    candidate.getTerm(),
-                                    roundScore(candidate.getScore())))
+                                    candidate.term(),
+                                    roundScore(candidate.score())))
                             .toList();
                 }
             }
@@ -626,33 +680,13 @@ public class CorpusIndexService {
                 CorpusTokenizer.normalize(node.path("update_date").asText("")));
     }
 
-    private List<Path> listShards(Path yearsDir) {
-        try (var stream = Files.list(yearsDir)) {
-            return stream
-                    .filter(path -> path.getFileName().toString().endsWith(".jsonl"))
-                    .sorted()
-                    .toList();
-        } catch (IOException exception) {
-            throw new UncheckedIOException("Failed to list dataset shards: " + yearsDir, exception);
+    private Map<String, CorpusIndexSnapshot.PostingList> freezePostings(
+            Map<String, PostingAccumulator> postingAccumulators) {
+        Map<String, CorpusIndexSnapshot.PostingList> postings = new HashMap<>(postingAccumulators.size());
+        for (Map.Entry<String, PostingAccumulator> entry : postingAccumulators.entrySet()) {
+            postings.put(entry.getKey(), entry.getValue().freeze());
         }
-    }
-
-    private void forEachRecord(Path shard, JsonNodeConsumer consumer) {
-        try (var reader = Files.newBufferedReader(shard)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.isBlank()) {
-                    continue;
-                }
-                try {
-                    consumer.accept(objectMapper.readTree(line));
-                } catch (IOException exception) {
-                    throw new UncheckedIOException("Failed to parse JSONL line in " + shard, exception);
-                }
-            }
-        } catch (IOException exception) {
-            throw new UncheckedIOException("Failed to read dataset shard: " + shard, exception);
-        }
+        return postings;
     }
 
     private String buildSnippet(String abstractText, Collection<String> matchedTerms) {
@@ -660,10 +694,10 @@ public class CorpusIndexService {
         if (normalized.length() <= 260) {
             return normalized;
         }
-        String lower = normalized.toLowerCase();
+        String lower = normalized.toLowerCase(Locale.ROOT);
         int matchIndex = Integer.MAX_VALUE;
         for (String term : matchedTerms) {
-            int candidate = lower.indexOf(term.toLowerCase());
+            int candidate = lower.indexOf(term.toLowerCase(Locale.ROOT));
             if (candidate >= 0) {
                 matchIndex = Math.min(matchIndex, candidate);
             }
@@ -713,7 +747,7 @@ public class CorpusIndexService {
             List<String> warnings,
             AtomicLong importedRecordCount) throws IOException {
         String originalFilename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename().trim();
-        String lowercaseName = originalFilename.toLowerCase();
+        String lowercaseName = originalFilename.toLowerCase(Locale.ROOT);
         if (lowercaseName.endsWith(".jsonl")) {
             importJsonLines(file, yearsDir, warnings, importedRecordCount);
             return;
@@ -750,26 +784,83 @@ public class CorpusIndexService {
             Path yearsDir,
             List<String> warnings,
             AtomicLong importedRecordCount) throws IOException {
-        JsonNode root = objectMapper.readTree(file.getInputStream());
         try (UploadWriters writers = new UploadWriters(yearsDir, objectMapper)) {
-            if (root.isArray()) {
-                for (JsonNode node : root) {
-                    if (writeUploadedRecord(node, writers, warnings)) {
-                        importedRecordCount.incrementAndGet();
-                    }
+            try (JsonParser parser = objectMapper.getFactory().createParser(file.getInputStream())) {
+                JsonToken firstToken = parser.nextToken();
+                if (firstToken == JsonToken.START_ARRAY) {
+                    streamJsonArray(parser, writers, warnings, importedRecordCount);
+                    return;
                 }
+            }
+
+            String wrappedField = detectWrappedArrayField(file);
+            if (wrappedField != null) {
+                streamWrappedJsonArray(file, wrappedField, writers, warnings, importedRecordCount);
                 return;
             }
-            JsonNode wrappedRecords = extractWrappedRecords(root);
-            if (wrappedRecords != null && wrappedRecords.isArray()) {
-                for (JsonNode node : wrappedRecords) {
-                    if (writeUploadedRecord(node, writers, warnings)) {
-                        importedRecordCount.incrementAndGet();
-                    }
-                }
-                return;
-            }
+
+            JsonNode root = objectMapper.readTree(file.getInputStream());
             if (writeUploadedRecord(root, writers, warnings)) {
+                importedRecordCount.incrementAndGet();
+            }
+        }
+    }
+
+    private String detectWrappedArrayField(MultipartFile file) throws IOException {
+        try (JsonParser parser = objectMapper.getFactory().createParser(file.getInputStream())) {
+            if (parser.nextToken() != JsonToken.START_OBJECT) {
+                return null;
+            }
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String fieldName = parser.currentName();
+                JsonToken valueToken = parser.nextToken();
+                if (WRAPPED_RECORD_FIELDS.contains(fieldName) && valueToken == JsonToken.START_ARRAY) {
+                    return fieldName;
+                }
+                parser.skipChildren();
+            }
+            return null;
+        }
+    }
+
+    private void streamWrappedJsonArray(
+            MultipartFile file,
+            String wrappedField,
+            UploadWriters writers,
+            List<String> warnings,
+            AtomicLong importedRecordCount) throws IOException {
+        try (JsonParser parser = objectMapper.getFactory().createParser(file.getInputStream())) {
+            if (parser.nextToken() != JsonToken.START_OBJECT) {
+                return;
+            }
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String fieldName = parser.currentName();
+                JsonToken valueToken = parser.nextToken();
+                if (!wrappedField.equals(fieldName)) {
+                    parser.skipChildren();
+                    continue;
+                }
+                if (valueToken == JsonToken.START_ARRAY) {
+                    streamJsonArray(parser, writers, warnings, importedRecordCount);
+                } else if (valueToken == JsonToken.START_OBJECT) {
+                    JsonNode node = objectMapper.readTree(parser);
+                    if (writeUploadedRecord(node, writers, warnings)) {
+                        importedRecordCount.incrementAndGet();
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    private void streamJsonArray(
+            JsonParser parser,
+            UploadWriters writers,
+            List<String> warnings,
+            AtomicLong importedRecordCount) throws IOException {
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            JsonNode node = objectMapper.readTree(parser);
+            if (writeUploadedRecord(node, writers, warnings)) {
                 importedRecordCount.incrementAndGet();
             }
         }
@@ -781,19 +872,6 @@ public class CorpusIndexService {
         } catch (IOException exception) {
             throw new UncheckedIOException("Failed to parse uploaded JSONL in " + filename, exception);
         }
-    }
-
-    private JsonNode extractWrappedRecords(JsonNode root) {
-        if (root == null || !root.isObject()) {
-            return null;
-        }
-        for (String fieldName : List.of("data", "records", "papers", "items", "documents")) {
-            JsonNode candidate = root.get(fieldName);
-            if (candidate != null && candidate.isArray()) {
-                return candidate;
-            }
-        }
-        return null;
     }
 
     private boolean writeUploadedRecord(JsonNode rawNode, UploadWriters writers, List<String> warnings)
@@ -924,6 +1002,15 @@ public class CorpusIndexService {
         return segment.matches("\\d{2}") ? Integer.parseInt(segment) : 0;
     }
 
+    private List<String> limitWarnings(List<String> warnings) {
+        if (warnings.size() <= 25) {
+            return List.copyOf(warnings);
+        }
+        ArrayList<String> limited = new ArrayList<>(warnings.subList(0, 25));
+        limited.add("Additional warnings omitted: " + (warnings.size() - 25));
+        return List.copyOf(limited);
+    }
+
     private static long elapsedMillis(long startNanos) {
         return Math.round((System.nanoTime() - startNanos) / 1_000_000.0d);
     }
@@ -932,9 +1019,13 @@ public class CorpusIndexService {
         return Math.round(value * 1000.0d) / 1000.0d;
     }
 
-    private interface JsonNodeConsumer {
-        void accept(JsonNode node) throws IOException;
+    private interface LineConsumer {
+        void accept(String line) throws IOException;
     }
+
+    private record SearchHit(int documentOrdinal, double score) {}
+
+    private record KeywordCandidate(String term, double score) {}
 
     private static final class UploadWriters implements AutoCloseable {
         private final Path yearsDir;
@@ -957,6 +1048,7 @@ public class CorpusIndexService {
             try {
                 return Files.newBufferedWriter(
                         shard,
+                        StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE,
                         StandardOpenOption.APPEND,
                         StandardOpenOption.WRITE);
@@ -984,26 +1076,6 @@ public class CorpusIndexService {
             }
         }
     }
-
-    private static final class KeywordCandidate {
-        private final String term;
-        private final double score;
-
-        private KeywordCandidate(String term, double score) {
-            this.term = term;
-            this.score = score;
-        }
-
-        private String getTerm() {
-            return term;
-        }
-
-        private double getScore() {
-            return score;
-        }
-    }
-
-    private record SearchHit(int documentOrdinal, double score) {}
 
     private static final class PostingAccumulator {
         private int[] documentOrdinals = new int[16];

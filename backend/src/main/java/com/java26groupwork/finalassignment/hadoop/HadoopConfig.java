@@ -17,6 +17,8 @@ public class HadoopConfig {
         if (properties.getMode() == HadoopProperties.Mode.LOCAL) {
             configuration.set("fs.defaultFS", "file:///");
             configuration.set("mapreduce.framework.name", "local");
+            configuration.set("fs.file.impl",
+                    LocalDevFileSystem.class.getName());
             configuration.set("fs.file.impl.disable.cache", "true");
             return configuration;
         }
