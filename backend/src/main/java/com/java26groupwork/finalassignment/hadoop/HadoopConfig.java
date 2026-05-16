@@ -12,15 +12,18 @@ public class HadoopConfig {
 
     @Bean
     public org.apache.hadoop.conf.Configuration hadoopConfiguration(HadoopProperties properties) {
-        org.apache.hadoop.conf.Configuration configuration = new org.apache.hadoop.conf.Configuration(false);
-
         if (properties.getMode() == HadoopProperties.Mode.LOCAL) {
-            return configuration;
+            return new org.apache.hadoop.conf.Configuration(false);
         }
+
+        // Keep Hadoop's built-in defaults so client-side abstractions like FileContext
+        // still know the core filesystem implementations for schemes such as hdfs.
+        org.apache.hadoop.conf.Configuration configuration = new org.apache.hadoop.conf.Configuration();
 
         Path configDir = Path.of(properties.getConfigDir());
         addRequiredResource(configuration, configDir.resolve("core-site.xml"));
         addRequiredResource(configuration, configDir.resolve("hdfs-site.xml"));
+        addRequiredResource(configuration, configDir.resolve("mapred-site.xml"));
 
         Path yarnSite = configDir.resolve("yarn-site.xml");
         if (Files.isReadable(yarnSite)) {

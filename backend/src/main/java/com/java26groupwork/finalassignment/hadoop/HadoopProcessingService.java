@@ -17,6 +17,12 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.mapreduce.Job;
@@ -30,6 +36,8 @@ import com.java26groupwork.finalassignment.hadoop.jobs.TfIdfJob;
 
 @Service
 public class HadoopProcessingService {
+
+    private static final int MAX_CLUSTER_NODE_BUDGET = 4;
 
     private final HadoopProperties properties;
     private final org.apache.hadoop.conf.Configuration hadoopConfiguration;
@@ -105,23 +113,22 @@ public class HadoopProcessingService {
                         List.copyOf(stageResult.warnings()));
             }
 
-            int reducerTasks = reducerTasksForCluster(stageResult);
+            ClusterExecutionPlan executionPlan = clusterExecutionPlan(properties.getReducerTasks());
 
             Job termFrequencyJob = TermFrequencyJob.createJob(
                     new org.apache.hadoop.conf.Configuration(configuration),
                     stageResult.inputPath(),
                     workPaths.termFrequency());
             applyJobJar(termFrequencyJob);
-            applyReducerTasks(termFrequencyJob, reducerTasks);
-            runJob(termFrequencyJob);
+            applyReducerTasks(termFrequencyJob, executionPlan.termFrequencyReducers());
 
             Job documentFrequencyJob = DocumentFrequencyJob.createJob(
                     new org.apache.hadoop.conf.Configuration(configuration),
                     stageResult.inputPath(),
                     workPaths.documentFrequency());
             applyJobJar(documentFrequencyJob);
-            applyReducerTasks(documentFrequencyJob, reducerTasks);
-            runJob(documentFrequencyJob);
+            applyReducerTasks(documentFrequencyJob, executionPlan.documentFrequencyReducers());
+            runJobWave(List.of(termFrequencyJob, documentFrequencyJob), executionPlan.parallelFirstWave());
 
             org.apache.hadoop.conf.Configuration tfIdfConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
@@ -132,7 +139,7 @@ public class HadoopProcessingService {
                     workPaths.documentFrequency(),
                     workPaths.tfIdf());
             applyJobJar(tfIdfJob);
-            applyReducerTasks(tfIdfJob, reducerTasks);
+            applyReducerTasks(tfIdfJob, executionPlan.tfIdfReducers());
             runJob(tfIdfJob);
 
             org.apache.hadoop.conf.Configuration keywordsConfiguration =
@@ -144,8 +151,7 @@ public class HadoopProcessingService {
                     workPaths.tfIdf(),
                     workPaths.documentKeywords());
             applyJobJar(documentKeywordsJob);
-            applyReducerTasks(documentKeywordsJob, reducerTasks);
-            runJob(documentKeywordsJob);
+            applyReducerTasks(documentKeywordsJob, executionPlan.documentKeywordsReducers());
 
             org.apache.hadoop.conf.Configuration invertedIndexConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
@@ -159,8 +165,8 @@ public class HadoopProcessingService {
                     workPaths.documentFrequency(),
                     workPaths.invertedIndex());
             applyJobJar(invertedIndexJob);
-            applyReducerTasks(invertedIndexJob, reducerTasks);
-            runJob(invertedIndexJob);
+            applyReducerTasks(invertedIndexJob, executionPlan.invertedIndexReducers());
+            runJobWave(List.of(documentKeywordsJob, invertedIndexJob), executionPlan.parallelFinalWave());
 
             return new ProcessingArtifacts(
                     sourceDatasetDir.toAbsolutePath().normalize(),
@@ -459,6 +465,49 @@ public class HadoopProcessingService {
         }
     }
 
+    private void runJobWave(List<Job> jobs, boolean parallelExecution)
+            throws IOException, ClassNotFoundException, InterruptedException {
+        if (!parallelExecution || jobs.size() < 2) {
+            for (Job job : jobs) {
+                runJob(job);
+            }
+            return;
+        }
+
+        ExecutorService executor = Executors.newFixedThreadPool(jobs.size(), task -> {
+            Thread thread = new Thread(task, "hadoop-job-wave");
+            thread.setDaemon(true);
+            return thread;
+        });
+        CompletionService<Job> completionService = new ExecutorCompletionService<>(executor);
+
+        try {
+            for (Job job : jobs) {
+                completionService.submit(() -> {
+                    runJob(job);
+                    return job;
+                });
+            }
+
+            for (int completedJobs = 0; completedJobs < jobs.size(); completedJobs++) {
+                Future<Job> future = completionService.take();
+                try {
+                    future.get();
+                } catch (ExecutionException exception) {
+                    Throwable failure = exception.getCause() == null ? exception : exception.getCause();
+                    suppressKillFailure(failure, jobs);
+                    rethrowJobFailure(failure);
+                } catch (InterruptedException exception) {
+                    suppressKillFailure(exception, jobs);
+                    Thread.currentThread().interrupt();
+                    throw exception;
+                }
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     private void applyReducerTasks(Job job, int reducerTasks) {
         if (reducerTasks > 0) {
             job.setNumReduceTasks(reducerTasks);
@@ -473,13 +522,77 @@ public class HadoopProcessingService {
         job.setJar(configuredJobJar);
     }
 
-    private int reducerTasksForCluster(StageResult stageResult) {
-        if (properties.getMode() != HadoopProperties.Mode.CLUSTER) {
-            return 1;
+    private void suppressKillFailure(Throwable failure, List<Job> jobs) {
+        try {
+            killIncompleteJobs(jobs);
+        } catch (IOException killFailure) {
+            failure.addSuppressed(killFailure);
         }
-        int configuredReducers = Math.max(1, properties.getReducerTasks());
-        int shardBound = Math.max(1, stageResult.inputShardCount());
-        return Math.min(configuredReducers, shardBound);
+    }
+
+    private void killIncompleteJobs(List<Job> jobs) throws IOException {
+        IOException failure = null;
+        for (Job job : jobs) {
+            try {
+                if (!job.isComplete()) {
+                    job.killJob();
+                }
+            } catch (IOException exception) {
+                if (failure == null) {
+                    failure = exception;
+                } else {
+                    failure.addSuppressed(exception);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private void rethrowJobFailure(Throwable failure) throws IOException, ClassNotFoundException, InterruptedException {
+        if (failure instanceof IOException ioException) {
+            throw ioException;
+        }
+        if (failure instanceof ClassNotFoundException classNotFoundException) {
+            throw classNotFoundException;
+        }
+        if (failure instanceof InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+            throw interruptedException;
+        }
+        if (failure instanceof RuntimeException runtimeException) {
+            throw runtimeException;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        throw new IllegalStateException("Unexpected Hadoop job execution failure.", failure);
+    }
+
+    // Keep concurrent work bounded to the actual cluster size. This pipeline only opens
+    // two lanes where the DAG is independent, and never budgets more than four reducers
+    // across a wave because the team only has four nodes available.
+    static ClusterExecutionPlan clusterExecutionPlan(int configuredReducerTasks) {
+        int reducerBudget = Math.max(1, Math.min(MAX_CLUSTER_NODE_BUDGET, configuredReducerTasks));
+        if (reducerBudget == 1) {
+            return new ClusterExecutionPlan(1, 1, 1, 1, 1, 1, false, false);
+        }
+
+        int termFrequencyReducers = Math.min(2, reducerBudget - 1);
+        int documentFrequencyReducers = Math.max(1, reducerBudget - termFrequencyReducers);
+        int documentKeywordsReducers = 1;
+        int invertedIndexReducers = Math.max(1, reducerBudget - documentKeywordsReducers);
+
+        return new ClusterExecutionPlan(
+                reducerBudget,
+                termFrequencyReducers,
+                documentFrequencyReducers,
+                reducerBudget,
+                documentKeywordsReducers,
+                invertedIndexReducers,
+                true,
+                true);
     }
 
     private void deleteIfExists(FileSystem fileSystem, org.apache.hadoop.fs.Path path) throws IOException {
@@ -534,6 +647,16 @@ public class HadoopProcessingService {
             org.apache.hadoop.fs.Path inputPath,
             int documentCount,
             int inputShardCount) {}
+
+    static record ClusterExecutionPlan(
+            int reducerBudget,
+            int termFrequencyReducers,
+            int documentFrequencyReducers,
+            int tfIdfReducers,
+            int documentKeywordsReducers,
+            int invertedIndexReducers,
+            boolean parallelFirstWave,
+            boolean parallelFinalWave) {}
 
     private static final class StagingWriters implements AutoCloseable {
         private final FileSystem fileSystem;
