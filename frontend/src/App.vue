@@ -34,59 +34,21 @@
 
     <section class="search-panel">
       <div class="search-heading">
-        <p class="section-label">Retrieval Console</p>
-        <h2>Query the corpus</h2>
+        <p class="section-label">Dataset Setup</p>
+        <h2>Use the default corpus or upload your own</h2>
       </div>
 
       <div v-if="uiError" class="error-strip">
         {{ uiError }}
       </div>
 
-      <form class="search-form" @submit.prevent="runSearch">
-        <label class="field field-query">
-          <span>Query</span>
-          <input
-            v-model="query"
-            type="text"
-            placeholder="graph neural network, federated learning, diffusion planning..."
-          />
-        </label>
-
-        <label class="field">
-          <span>Year</span>
-          <select v-model="selectedYear">
-            <option value="">All years</option>
-            <option v-for="year in yearOptions" :key="year" :value="String(year)">
-              {{ year }}
-            </option>
-          </select>
-        </label>
-
-        <label class="field">
-          <span>Category</span>
-          <select v-model="selectedCategory">
-            <option value="">All categories</option>
-            <option
-              v-for="category in categoryOptions"
-              :key="category.name"
-              :value="category.name"
-            >
-              {{ category.name }}
-            </option>
-          </select>
-        </label>
-
-        <button class="primary-button" :disabled="searchPending">
-          {{ searchPending ? 'Searching...' : 'Run Search' }}
-        </button>
-      </form>
-
       <div class="upload-panel">
         <div class="upload-copy">
           <p class="section-label">Dataset Import</p>
           <p class="upload-hint">
-            Choose one or more `.json` or `.jsonl` files, upload them to stage the dataset, then
-            run analysis explicitly. The current upload limit is 1 GB per request.
+            A default dataset is already available for this demo. Upload one or more `.json` or
+            `.jsonl` files only if you want to replace it, then run analysis explicitly. The
+            current upload limit is 1 GB per request.
           </p>
           <p class="upload-meta dataset-meta">
             {{ analysisScopeText }}
@@ -147,6 +109,10 @@
         </div>
       </div>
 
+      <p v-if="!analysisReady" class="setup-note">
+        {{ setupGuidanceText }}
+      </p>
+
       <div v-if="uploadResult" class="success-strip">
         {{ uploadResult }}
       </div>
@@ -160,192 +126,244 @@
       </div>
     </section>
 
-    <section class="metrics-grid">
-      <article v-for="card in summaryCards" :key="card.label" class="metric-card">
-        <p class="metric-label">{{ card.label }}</p>
-        <p class="metric-value">{{ card.value }}</p>
-        <p class="metric-detail">{{ card.detail }}</p>
-      </article>
-    </section>
+    <template v-if="analysisReady">
+      <section class="metrics-grid">
+        <article v-for="card in summaryCards" :key="card.label" class="metric-card">
+          <p class="metric-label">{{ card.label }}</p>
+          <p class="metric-value">{{ card.value }}</p>
+          <p class="metric-detail">{{ card.detail }}</p>
+        </article>
+      </section>
 
-    <section class="content-grid">
-      <article class="panel overview-panel full-span">
-        <div class="panel-head">
-          <div>
-            <p class="section-label">Corpus Overview</p>
-            <h2>Year distribution</h2>
+      <section class="content-grid">
+        <article class="panel overview-panel full-span">
+          <div class="panel-head">
+            <div>
+              <p class="section-label">Corpus Overview</p>
+              <h2>Year distribution</h2>
+            </div>
+            <p class="panel-meta">{{ formatNumber(totalDocuments) }} docs</p>
           </div>
-          <p class="panel-meta">{{ formatNumber(totalDocuments) }} docs</p>
-        </div>
 
-        <div v-if="overview?.years?.length" class="year-list">
-          <div v-for="year in overview.years" :key="year.year" class="year-row">
-            <div class="year-row-head">
-              <span class="year-label">{{ year.year }}</span>
-              <span class="year-count">{{ formatNumber(year.recordCount) }}</span>
-            </div>
-            <div class="bar-track">
-              <div class="bar-fill" :style="{ width: yearWidth(year.recordCount) }"></div>
-            </div>
-            <div v-if="year.keywords?.length" class="keyword-chip-row">
-              <span
-                v-for="keyword in year.keywords"
-                :key="`${year.year}-${keyword.term}`"
-                class="keyword-chip"
-              >
-                {{ keyword.term }} ({{ keyword.score.toFixed(2) }})
-              </span>
-            </div>
-            <p v-else class="year-keyword-empty">No distinctive yearly keywords.</p>
-          </div>
-        </div>
-      </article>
-    </section>
-
-    <section class="content-grid results-grid">
-      <article class="panel results-panel">
-        <div class="panel-head">
-          <div class="panel-title-block">
-            <p class="section-label">Results</p>
-            <h2>Ranked hits</h2>
-            <p class="panel-caption">{{ resultsQueryText }}</p>
-          </div>
-          <p class="panel-meta">
-            {{ searchResponse ? `${formatNumber(searchResponse.totalHits)} hits` : 'No search yet' }}
-          </p>
-        </div>
-
-        <div v-if="searchPending" class="empty-state">Searching the corpus...</div>
-        <div v-else-if="!searchResults.length" class="empty-state">
-          Run a query to inspect ranked search results and document keywords.
-        </div>
-        <div v-else class="results-shell">
-          <div class="scroll-progress">
-            <div class="progress-copy">
-              <span>{{ resultsCoverageText }}</span>
-              <span>{{ Math.round(resultsScrollProgress) }}%</span>
-            </div>
-            <div class="progress-bar" aria-hidden="true">
-              <div
-                class="progress-bar-fill"
-                :style="{ width: `${Math.max(resultsScrollProgress, 6)}%` }"
-              ></div>
-            </div>
-          </div>
-          <div ref="resultsScroller" class="results-scroll" @scroll="updateResultsScrollProgress">
-            <button
-              v-for="result in searchResults"
-              :key="result.id"
-              type="button"
-              class="result-card"
-              :class="{ active: selectedDocument?.document?.id === result.id }"
-              @click="loadDocument(result.id)"
-            >
-              <div class="result-header">
-                <span class="result-year">{{ result.year }}</span>
-                <span class="result-score">score {{ result.score.toFixed(3) }}</span>
+          <div v-if="overview?.years?.length" class="year-list">
+            <div v-for="year in overview.years" :key="year.year" class="year-row">
+              <div class="year-row-head">
+                <span class="year-label">{{ year.year }}</span>
+                <span class="year-count">{{ formatNumber(year.recordCount) }}</span>
               </div>
-              <h3>{{ result.title }}</h3>
-              <p class="result-snippet">{{ result.abstractSnippet }}</p>
-              <div class="result-meta">
-                <span>{{ result.primaryCategory }}</span>
-                <span>{{ result.authors || 'Unknown authors' }}</span>
+              <div class="bar-track">
+                <div class="bar-fill" :style="{ width: yearWidth(year.recordCount) }"></div>
               </div>
-              <div class="keyword-chip-row">
+              <div v-if="year.keywords?.length" class="keyword-chip-row">
                 <span
-                  v-for="term in result.matchedTerms"
-                  :key="`${result.id}-${term}`"
-                  class="keyword-chip match"
-                >
-                  {{ term }}
-                </span>
-                <span
-                  v-for="keyword in result.keywords.slice(0, 4)"
-                  :key="`${result.id}-${keyword.term}`"
-                  class="keyword-chip secondary"
-                >
-                  {{ keyword.term }}
-                </span>
-              </div>
-            </button>
-          </div>
-        </div>
-      </article>
-
-      <article class="panel detail-panel">
-        <div class="panel-head">
-          <div class="panel-title-block">
-            <p class="section-label">Document Detail</p>
-            <h2>{{ selectedDocument?.document?.title ?? 'Select a result' }}</h2>
-            <p class="panel-caption">{{ detailSummaryText }}</p>
-          </div>
-          <p class="panel-meta">{{ detailPending ? 'Loading...' : selectedDocument?.status ?? 'idle' }}</p>
-        </div>
-
-        <div v-if="detailPending" class="empty-state">Loading document detail...</div>
-        <div v-else-if="!selectedDocument?.ready" class="empty-state">
-          Pick a result to inspect the stored document fields and extracted keywords.
-        </div>
-        <div v-else class="detail-scroll">
-          <div class="detail-body">
-            <div class="detail-meta-grid">
-              <div>
-                <span class="detail-label">arXiv ID</span>
-                <p>{{ selectedDocument.document.id }}</p>
-              </div>
-              <div>
-                <span class="detail-label">Year / Month</span>
-                <p>{{ selectedDocument.document.year }} / {{ selectedDocument.document.month }}</p>
-              </div>
-              <div>
-                <span class="detail-label">Primary category</span>
-                <p>{{ selectedDocument.document.primaryCategory }}</p>
-              </div>
-              <div>
-                <span class="detail-label">Updated</span>
-                <p>{{ selectedDocument.document.updateDate || 'n/a' }}</p>
-              </div>
-            </div>
-
-            <div class="detail-section">
-              <span class="detail-label">Authors</span>
-              <p>{{ selectedDocument.document.authors || 'Unknown authors' }}</p>
-            </div>
-
-            <div class="detail-section">
-              <span class="detail-label">Categories</span>
-              <div class="keyword-chip-row">
-                <span
-                  v-for="category in selectedDocument.document.categories"
-                  :key="category"
-                  class="keyword-chip secondary"
-                >
-                  {{ category }}
-                </span>
-              </div>
-            </div>
-
-            <div class="detail-section">
-              <span class="detail-label">Abstract</span>
-              <p class="detail-abstract">{{ selectedDocument.document.abstractText }}</p>
-            </div>
-
-            <div class="detail-section">
-              <span class="detail-label">Extracted keywords</span>
-              <div class="keyword-chip-row">
-                <span
-                  v-for="keyword in selectedDocument.keywords"
-                  :key="`${selectedDocument.document.id}-${keyword.term}`"
+                  v-for="keyword in year.keywords"
+                  :key="`${year.year}-${keyword.term}`"
                   class="keyword-chip"
                 >
-                  {{ keyword.term }}
+                  {{ keyword.term }} ({{ keyword.score.toFixed(2) }})
                 </span>
+              </div>
+              <p v-else class="year-keyword-empty">No distinctive yearly keywords.</p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="search-panel">
+        <div class="search-heading">
+          <p class="section-label">Retrieval Console</p>
+          <h2>Query the corpus</h2>
+        </div>
+
+        <form class="search-form" @submit.prevent="runSearch">
+          <label class="field field-query">
+            <span>Query</span>
+            <input
+              v-model="query"
+              type="text"
+              placeholder="graph neural network, federated learning, diffusion planning..."
+            />
+          </label>
+
+          <label class="field">
+            <span>Year</span>
+            <select v-model="selectedYear">
+              <option value="">All years</option>
+              <option v-for="year in yearOptions" :key="year" :value="String(year)">
+                {{ year }}
+              </option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Category</span>
+            <select v-model="selectedCategory">
+              <option value="">All categories</option>
+              <option
+                v-for="category in categoryOptions"
+                :key="category.name"
+                :value="category.name"
+              >
+                {{ category.name }}
+              </option>
+            </select>
+          </label>
+
+          <button class="primary-button" :disabled="searchPending">
+            {{ searchPending ? 'Searching...' : 'Run Search' }}
+          </button>
+        </form>
+
+        <div v-if="searchWarnings.length" class="warning-strip">
+          <span v-for="warning in searchWarnings" :key="warning">{{ warning }}</span>
+        </div>
+      </section>
+
+      <section class="content-grid results-grid">
+        <article class="panel results-panel">
+          <div class="panel-head">
+            <div class="panel-title-block">
+              <p class="section-label">Results</p>
+              <h2>Ranked hits</h2>
+              <p class="panel-caption">{{ resultsQueryText }}</p>
+            </div>
+            <p class="panel-meta">
+              {{ searchResponse ? `${formatNumber(searchResponse.totalHits)} hits` : 'No search yet' }}
+            </p>
+          </div>
+
+          <div v-if="searchPending" class="empty-state">Searching the corpus...</div>
+          <div v-else-if="!searchResults.length" class="empty-state">
+            Run a query to inspect ranked search results and document keywords.
+          </div>
+          <div v-else class="results-shell">
+            <div class="scroll-progress">
+              <div class="progress-copy">
+                <span>{{ resultsCoverageText }}</span>
+                <span>{{ Math.round(resultsScrollProgress) }}%</span>
+              </div>
+              <div class="progress-bar" aria-hidden="true">
+                <div
+                  class="progress-bar-fill"
+                  :style="{ width: `${Math.max(resultsScrollProgress, 6)}%` }"
+                ></div>
+              </div>
+            </div>
+            <div ref="resultsScroller" class="results-scroll" @scroll="updateResultsScrollProgress">
+              <button
+                v-for="result in searchResults"
+                :key="result.id"
+                type="button"
+                class="result-card"
+                :class="{ active: selectedDocument?.document?.id === result.id }"
+                @click="loadDocument(result.id)"
+              >
+                <div class="result-header">
+                  <span class="result-year">{{ result.year }}</span>
+                  <span class="result-score">score {{ result.score.toFixed(3) }}</span>
+                </div>
+                <h3>{{ result.title }}</h3>
+                <p class="result-snippet">{{ result.abstractSnippet }}</p>
+                <div class="result-meta">
+                  <span>{{ result.primaryCategory }}</span>
+                  <span>{{ result.authors || 'Unknown authors' }}</span>
+                </div>
+                <div class="keyword-chip-row">
+                  <span
+                    v-for="term in result.matchedTerms"
+                    :key="`${result.id}-${term}`"
+                    class="keyword-chip match"
+                  >
+                    {{ term }}
+                  </span>
+                  <span
+                    v-for="keyword in result.keywords.slice(0, 4)"
+                    :key="`${result.id}-${keyword.term}`"
+                    class="keyword-chip secondary"
+                  >
+                    {{ keyword.term }}
+                  </span>
+                </div>
+              </button>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel detail-panel">
+          <div class="panel-head">
+            <div class="panel-title-block">
+              <p class="section-label">Document Detail</p>
+              <h2>{{ selectedDocument?.document?.title ?? 'Select a result' }}</h2>
+              <p class="panel-caption">{{ detailSummaryText }}</p>
+            </div>
+            <p class="panel-meta">{{ detailPending ? 'Loading...' : selectedDocument?.status ?? 'idle' }}</p>
+          </div>
+
+          <div v-if="detailPending" class="empty-state">Loading document detail...</div>
+          <div v-else-if="!selectedDocument?.ready" class="empty-state">
+            Pick a result to inspect the stored document fields and extracted keywords.
+          </div>
+          <div v-else class="detail-scroll">
+            <div class="detail-body">
+              <div class="detail-meta-grid">
+                <div>
+                  <span class="detail-label">arXiv ID</span>
+                  <p>{{ selectedDocument.document.id }}</p>
+                </div>
+                <div>
+                  <span class="detail-label">Year / Month</span>
+                  <p>{{ selectedDocument.document.year }} / {{ selectedDocument.document.month }}</p>
+                </div>
+                <div>
+                  <span class="detail-label">Primary category</span>
+                  <p>{{ selectedDocument.document.primaryCategory }}</p>
+                </div>
+                <div>
+                  <span class="detail-label">Updated</span>
+                  <p>{{ selectedDocument.document.updateDate || 'n/a' }}</p>
+                </div>
+              </div>
+
+              <div class="detail-section">
+                <span class="detail-label">Authors</span>
+                <p>{{ selectedDocument.document.authors || 'Unknown authors' }}</p>
+              </div>
+
+              <div class="detail-section">
+                <span class="detail-label">Categories</span>
+                <div class="keyword-chip-row">
+                  <span
+                    v-for="category in selectedDocument.document.categories"
+                    :key="category"
+                    class="keyword-chip secondary"
+                  >
+                    {{ category }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="detail-section">
+                <span class="detail-label">Abstract</span>
+                <p class="detail-abstract">{{ selectedDocument.document.abstractText }}</p>
+              </div>
+
+              <div class="detail-section">
+                <span class="detail-label">Extracted keywords</span>
+                <div class="keyword-chip-row">
+                  <span
+                    v-for="keyword in selectedDocument.keywords"
+                    :key="`${selectedDocument.document.id}-${keyword.term}`"
+                    class="keyword-chip"
+                  >
+                    {{ keyword.term }}
+                  </span>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </article>
-    </section>
+        </article>
+      </section>
+    </template>
   </main>
 </template>
 
@@ -402,6 +420,8 @@ const activeDatasetName = computed(() => {
   return datasetNameFromPath(activeDatasetPath.value) || 'No dataset selected';
 });
 
+const analysisReady = computed(() => overview.value?.ready ?? false);
+
 const statusBadgeText = computed(() => {
   const status = overview.value?.build?.status;
   if (overview.value?.ready) {
@@ -454,6 +474,13 @@ const analysisScopeText = computed(() => {
     return 'No dataset is configured yet. Upload a dataset before running analysis.';
   }
   return `Analysis is currently scoped to "${activeDatasetName.value}" at ${activeDatasetPath.value}.`;
+});
+
+const setupGuidanceText = computed(() => {
+  if (activeDatasetPath.value) {
+    return `The default dataset "${activeDatasetName.value}" is already available. Run analysis to unlock corpus statistics and retrieval, or upload a replacement dataset first.`;
+  }
+  return 'Upload a dataset and run analysis before corpus statistics and ranked retrieval become available.';
 });
 
 const resultsQueryText = computed(() => {
