@@ -17,22 +17,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletionService;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorCompletionService;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.mapreduce.Job;
 import org.springframework.stereotype.Service;
 
-import com.java26groupwork.finalassignment.hadoop.jobs.DocumentFrequencyJob;
 import com.java26groupwork.finalassignment.hadoop.jobs.DocumentKeywordsJob;
-import com.java26groupwork.finalassignment.hadoop.jobs.InvertedIndexJob;
-import com.java26groupwork.finalassignment.hadoop.jobs.TermFrequencyJob;
-import com.java26groupwork.finalassignment.hadoop.jobs.TfIdfJob;
+import com.java26groupwork.finalassignment.hadoop.jobs.ScoredTermsJob;
+import com.java26groupwork.finalassignment.hadoop.jobs.TermStatisticsJob;
 
 @Service
 public class HadoopProcessingService {
@@ -115,32 +107,30 @@ public class HadoopProcessingService {
 
             ClusterExecutionPlan executionPlan = clusterExecutionPlan(properties.getReducerTasks());
 
-            Job termFrequencyJob = TermFrequencyJob.createJob(
+            Job termStatisticsJob = TermStatisticsJob.createJob(
                     new org.apache.hadoop.conf.Configuration(configuration),
                     stageResult.inputPath(),
-                    workPaths.termFrequency());
-            applyJobJar(termFrequencyJob);
-            applyReducerTasks(termFrequencyJob, executionPlan.termFrequencyReducers());
+                    workPaths.termStatisticsRoot());
+            applyJobJar(termStatisticsJob);
+            applyReducerTasks(termStatisticsJob, executionPlan.termStatisticsReducers());
+            runJob(termStatisticsJob);
+            ensureDirectoriesExist(fileSystem, workPaths.termFrequency(), workPaths.documentFrequency());
 
-            Job documentFrequencyJob = DocumentFrequencyJob.createJob(
-                    new org.apache.hadoop.conf.Configuration(configuration),
-                    stageResult.inputPath(),
-                    workPaths.documentFrequency());
-            applyJobJar(documentFrequencyJob);
-            applyReducerTasks(documentFrequencyJob, executionPlan.documentFrequencyReducers());
-            runJobWave(List.of(termFrequencyJob, documentFrequencyJob), executionPlan.parallelFirstWave());
-
-            org.apache.hadoop.conf.Configuration tfIdfConfiguration =
+            org.apache.hadoop.conf.Configuration scoredTermsConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
-            tfIdfConfiguration.setInt(TfIdfJob.DOCUMENT_COUNT_KEY, stageResult.documentCount());
-            Job tfIdfJob = TfIdfJob.createJob(
-                    tfIdfConfiguration,
+            scoredTermsConfiguration.setInt(ScoredTermsJob.DOCUMENT_COUNT_KEY, stageResult.documentCount());
+            scoredTermsConfiguration.setDouble(
+                    ScoredTermsJob.MAX_DOCUMENT_FREQUENCY_RATIO_KEY,
+                    corpusProperties.getIndexMaxDocumentFrequencyRatio());
+            Job scoredTermsJob = ScoredTermsJob.createJob(
+                    scoredTermsConfiguration,
                     workPaths.termFrequency(),
                     workPaths.documentFrequency(),
-                    workPaths.tfIdf());
-            applyJobJar(tfIdfJob);
-            applyReducerTasks(tfIdfJob, executionPlan.tfIdfReducers());
-            runJob(tfIdfJob);
+                    workPaths.scoredTermsRoot());
+            applyJobJar(scoredTermsJob);
+            applyReducerTasks(scoredTermsJob, executionPlan.scoredTermsReducers());
+            runJob(scoredTermsJob);
+            ensureDirectoriesExist(fileSystem, workPaths.tfIdf(), workPaths.invertedIndex());
 
             org.apache.hadoop.conf.Configuration keywordsConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
@@ -152,21 +142,7 @@ public class HadoopProcessingService {
                     workPaths.documentKeywords());
             applyJobJar(documentKeywordsJob);
             applyReducerTasks(documentKeywordsJob, executionPlan.documentKeywordsReducers());
-
-            org.apache.hadoop.conf.Configuration invertedIndexConfiguration =
-                    new org.apache.hadoop.conf.Configuration(configuration);
-            invertedIndexConfiguration.setInt(InvertedIndexJob.DOCUMENT_COUNT_KEY, stageResult.documentCount());
-            invertedIndexConfiguration.setDouble(
-                    InvertedIndexJob.MAX_DOCUMENT_FREQUENCY_RATIO_KEY,
-                    corpusProperties.getIndexMaxDocumentFrequencyRatio());
-            Job invertedIndexJob = InvertedIndexJob.createJob(
-                    invertedIndexConfiguration,
-                    workPaths.tfIdf(),
-                    workPaths.documentFrequency(),
-                    workPaths.invertedIndex());
-            applyJobJar(invertedIndexJob);
-            applyReducerTasks(invertedIndexJob, executionPlan.invertedIndexReducers());
-            runJobWave(List.of(documentKeywordsJob, invertedIndexJob), executionPlan.parallelFinalWave());
+            runJob(documentKeywordsJob);
 
             return new ProcessingArtifacts(
                     sourceDatasetDir.toAbsolutePath().normalize(),
@@ -225,14 +201,18 @@ public class HadoopProcessingService {
         org.apache.hadoop.fs.Path root = new org.apache.hadoop.fs.Path(
                 new org.apache.hadoop.fs.Path(properties.getOutputPath()),
                 "analysis-" + runId);
+        org.apache.hadoop.fs.Path termStatisticsRoot = new org.apache.hadoop.fs.Path(root, "term-statistics");
+        org.apache.hadoop.fs.Path scoredTermsRoot = new org.apache.hadoop.fs.Path(root, "scored-terms");
         return new WorkPaths(
                 root,
                 new org.apache.hadoop.fs.Path(root, "input"),
-                new org.apache.hadoop.fs.Path(root, "tf"),
-                new org.apache.hadoop.fs.Path(root, "df"),
-                new org.apache.hadoop.fs.Path(root, "tfidf"),
+                termStatisticsRoot,
+                new org.apache.hadoop.fs.Path(termStatisticsRoot, TermStatisticsJob.TERM_FREQUENCY_DIRECTORY_NAME),
+                new org.apache.hadoop.fs.Path(termStatisticsRoot, TermStatisticsJob.DOCUMENT_FREQUENCY_DIRECTORY_NAME),
+                scoredTermsRoot,
+                new org.apache.hadoop.fs.Path(scoredTermsRoot, ScoredTermsJob.TF_IDF_DIRECTORY_NAME),
                 new org.apache.hadoop.fs.Path(root, "keywords"),
-                new org.apache.hadoop.fs.Path(root, "index"));
+                new org.apache.hadoop.fs.Path(scoredTermsRoot, ScoredTermsJob.INVERTED_INDEX_DIRECTORY_NAME));
     }
 
     private StageResult stageDataset(
@@ -465,49 +445,6 @@ public class HadoopProcessingService {
         }
     }
 
-    private void runJobWave(List<Job> jobs, boolean parallelExecution)
-            throws IOException, ClassNotFoundException, InterruptedException {
-        if (!parallelExecution || jobs.size() < 2) {
-            for (Job job : jobs) {
-                runJob(job);
-            }
-            return;
-        }
-
-        ExecutorService executor = Executors.newFixedThreadPool(jobs.size(), task -> {
-            Thread thread = new Thread(task, "hadoop-job-wave");
-            thread.setDaemon(true);
-            return thread;
-        });
-        CompletionService<Job> completionService = new ExecutorCompletionService<>(executor);
-
-        try {
-            for (Job job : jobs) {
-                completionService.submit(() -> {
-                    runJob(job);
-                    return job;
-                });
-            }
-
-            for (int completedJobs = 0; completedJobs < jobs.size(); completedJobs++) {
-                Future<Job> future = completionService.take();
-                try {
-                    future.get();
-                } catch (ExecutionException exception) {
-                    Throwable failure = exception.getCause() == null ? exception : exception.getCause();
-                    suppressKillFailure(failure, jobs);
-                    rethrowJobFailure(failure);
-                } catch (InterruptedException exception) {
-                    suppressKillFailure(exception, jobs);
-                    Thread.currentThread().interrupt();
-                    throw exception;
-                }
-            }
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
     private void applyReducerTasks(Job job, int reducerTasks) {
         if (reducerTasks > 0) {
             job.setNumReduceTasks(reducerTasks);
@@ -522,82 +459,22 @@ public class HadoopProcessingService {
         job.setJar(configuredJobJar);
     }
 
-    private void suppressKillFailure(Throwable failure, List<Job> jobs) {
-        try {
-            killIncompleteJobs(jobs);
-        } catch (IOException killFailure) {
-            failure.addSuppressed(killFailure);
-        }
-    }
-
-    private void killIncompleteJobs(List<Job> jobs) throws IOException {
-        IOException failure = null;
-        for (Job job : jobs) {
-            try {
-                if (!job.isComplete()) {
-                    job.killJob();
-                }
-            } catch (IOException exception) {
-                if (failure == null) {
-                    failure = exception;
-                } else {
-                    failure.addSuppressed(exception);
-                }
-            }
-        }
-        if (failure != null) {
-            throw failure;
-        }
-    }
-
-    private void rethrowJobFailure(Throwable failure) throws IOException, ClassNotFoundException, InterruptedException {
-        if (failure instanceof IOException ioException) {
-            throw ioException;
-        }
-        if (failure instanceof ClassNotFoundException classNotFoundException) {
-            throw classNotFoundException;
-        }
-        if (failure instanceof InterruptedException interruptedException) {
-            Thread.currentThread().interrupt();
-            throw interruptedException;
-        }
-        if (failure instanceof RuntimeException runtimeException) {
-            throw runtimeException;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        throw new IllegalStateException("Unexpected Hadoop job execution failure.", failure);
-    }
-
-    // Keep concurrent work bounded to the actual cluster size. This pipeline only opens
-    // two lanes where the DAG is independent, and never budgets more than four reducers
-    // across a wave because the team only has four nodes available.
+    // The merged pipeline now runs three sequential jobs, so each stage can use the
+    // full cluster reducer budget up to the four-node cap.
     static ClusterExecutionPlan clusterExecutionPlan(int configuredReducerTasks) {
         int reducerBudget = Math.max(1, Math.min(MAX_CLUSTER_NODE_BUDGET, configuredReducerTasks));
-        if (reducerBudget == 1) {
-            return new ClusterExecutionPlan(1, 1, 1, 1, 1, 1, false, false);
-        }
-
-        int termFrequencyReducers = Math.min(2, reducerBudget - 1);
-        int documentFrequencyReducers = Math.max(1, reducerBudget - termFrequencyReducers);
-        int documentKeywordsReducers = 1;
-        int invertedIndexReducers = Math.max(1, reducerBudget - documentKeywordsReducers);
-
-        return new ClusterExecutionPlan(
-                reducerBudget,
-                termFrequencyReducers,
-                documentFrequencyReducers,
-                reducerBudget,
-                documentKeywordsReducers,
-                invertedIndexReducers,
-                true,
-                true);
+        return new ClusterExecutionPlan(reducerBudget, reducerBudget, reducerBudget, reducerBudget);
     }
 
     private void deleteIfExists(FileSystem fileSystem, org.apache.hadoop.fs.Path path) throws IOException {
         if (fileSystem.exists(path)) {
             fileSystem.delete(path, true);
+        }
+    }
+
+    private void ensureDirectoriesExist(FileSystem fileSystem, org.apache.hadoop.fs.Path... paths) throws IOException {
+        for (org.apache.hadoop.fs.Path path : paths) {
+            fileSystem.mkdirs(path);
         }
     }
 
@@ -631,8 +508,10 @@ public class HadoopProcessingService {
     private record WorkPaths(
             org.apache.hadoop.fs.Path root,
             org.apache.hadoop.fs.Path input,
+            org.apache.hadoop.fs.Path termStatisticsRoot,
             org.apache.hadoop.fs.Path termFrequency,
             org.apache.hadoop.fs.Path documentFrequency,
+            org.apache.hadoop.fs.Path scoredTermsRoot,
             org.apache.hadoop.fs.Path tfIdf,
             org.apache.hadoop.fs.Path documentKeywords,
             org.apache.hadoop.fs.Path invertedIndex) {}
@@ -650,13 +529,9 @@ public class HadoopProcessingService {
 
     static record ClusterExecutionPlan(
             int reducerBudget,
-            int termFrequencyReducers,
-            int documentFrequencyReducers,
-            int tfIdfReducers,
-            int documentKeywordsReducers,
-            int invertedIndexReducers,
-            boolean parallelFirstWave,
-            boolean parallelFinalWave) {}
+            int termStatisticsReducers,
+            int scoredTermsReducers,
+            int documentKeywordsReducers) {}
 
     private static final class StagingWriters implements AutoCloseable {
         private final FileSystem fileSystem;
