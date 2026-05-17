@@ -14,19 +14,31 @@ import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.MultipleInputs;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.LazyOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 
-public final class TfIdfJob {
+public final class ScoredTermsJob {
 
     public static final String DOCUMENT_COUNT_KEY = "app.corpus.document-count";
+    public static final String MAX_DOCUMENT_FREQUENCY_RATIO_KEY = "app.corpus.max-document-frequency-ratio";
 
-    private TfIdfJob() {}
+    public static final String TF_IDF_DIRECTORY_NAME = "tfidf";
+    public static final String INVERTED_INDEX_DIRECTORY_NAME = "index";
+
+    private static final String TF_IDF_OUTPUT_NAME = "tfIdf";
+    private static final String INVERTED_INDEX_OUTPUT_NAME = "invertedIndex";
+    private static final String TF_IDF_BASE_OUTPUT_PATH = TF_IDF_DIRECTORY_NAME + "/part";
+    private static final String INVERTED_INDEX_BASE_OUTPUT_PATH = INVERTED_INDEX_DIRECTORY_NAME + "/part";
+
+    private ScoredTermsJob() {}
 
     public static Job createJob(
             Configuration configuration, Path termFrequencyPath, Path documentFrequencyPath, Path outputPath)
             throws IOException {
-        Job job = Job.getInstance(configuration, "arxiv-tf-idf");
-        job.setJarByClass(TfIdfJob.class);
-        job.setReducerClass(TfIdfReducer.class);
+        Job job = Job.getInstance(configuration, "arxiv-scored-terms");
+        job.setJarByClass(ScoredTermsJob.class);
+        job.setReducerClass(ScoredTermsReducer.class);
         job.setMapOutputKeyClass(Text.class);
         job.setMapOutputValueClass(Text.class);
         job.setOutputKeyClass(Text.class);
@@ -35,6 +47,10 @@ public final class TfIdfJob {
         MultipleInputs.addInputPath(
                 job, documentFrequencyPath, TextInputFormat.class, DocumentFrequencyInputMapper.class);
         FileOutputFormat.setOutputPath(job, outputPath);
+        LazyOutputFormat.setOutputFormatClass(job, TextOutputFormat.class);
+        MultipleOutputs.addNamedOutput(job, TF_IDF_OUTPUT_NAME, TextOutputFormat.class, Text.class, Text.class);
+        MultipleOutputs.addNamedOutput(
+                job, INVERTED_INDEX_OUTPUT_NAME, TextOutputFormat.class, Text.class, Text.class);
         return job;
     }
 
@@ -43,7 +59,7 @@ public final class TfIdfJob {
         @Override
         protected void map(LongWritable key, Text value, Context context)
                 throws IOException, InterruptedException {
-            String[] parts = value.toString().split("\t");
+            String[] parts = value.toString().split("\t", 3);
             if (parts.length < 3) {
                 return;
             }
@@ -56,7 +72,7 @@ public final class TfIdfJob {
         @Override
         protected void map(LongWritable key, Text value, Context context)
                 throws IOException, InterruptedException {
-            String[] parts = value.toString().split("\t");
+            String[] parts = value.toString().split("\t", 2);
             if (parts.length < 2) {
                 return;
             }
@@ -64,12 +80,21 @@ public final class TfIdfJob {
         }
     }
 
-    public static final class TfIdfReducer extends Reducer<Text, Text, Text, Text> {
+    public static final class ScoredTermsReducer extends Reducer<Text, Text, Text, Text> {
+
+        private MultipleOutputs<Text, Text> outputs;
+
+        @Override
+        protected void setup(Context context) {
+            outputs = new MultipleOutputs<>(context);
+        }
 
         @Override
         protected void reduce(Text term, Iterable<Text> values, Context context)
                 throws IOException, InterruptedException {
             int documentCount = context.getConfiguration().getInt(DOCUMENT_COUNT_KEY, 1);
+            double maxDocumentFrequencyRatio = context.getConfiguration()
+                    .getDouble(MAX_DOCUMENT_FREQUENCY_RATIO_KEY, 1.0d);
             int documentFrequency = 0;
             List<TermFrequencyRow> rows = new ArrayList<>();
 
@@ -89,31 +114,34 @@ public final class TfIdfJob {
                 return;
             }
 
+            String termText = term.toString();
             double idf = Math.log((documentCount + 1.0d) / (documentFrequency + 1.0d)) + 1.0d;
+            double maxDocumentFrequency = documentCount * maxDocumentFrequencyRatio;
+            boolean includeInIndex = documentFrequency <= maxDocumentFrequency;
+
             for (TermFrequencyRow row : rows) {
-                double score = (1.0d + Math.log(row.getTermFrequency())) * idf;
-                context.write(
-                        new Text(term.toString() + "\t" + row.getDocumentId()),
-                        new Text(String.format(Locale.ROOT, "%.6f", score)));
+                double score = (1.0d + Math.log(row.termFrequency())) * idf;
+                String formattedScore = String.format(Locale.ROOT, "%.6f", score);
+                outputs.write(
+                        TF_IDF_OUTPUT_NAME,
+                        new Text(termText + "\t" + row.documentId()),
+                        new Text(formattedScore),
+                        TF_IDF_BASE_OUTPUT_PATH);
+                if (includeInIndex) {
+                    outputs.write(
+                            INVERTED_INDEX_OUTPUT_NAME,
+                            new Text(termText),
+                            new Text(row.documentId() + "\t" + formattedScore),
+                            INVERTED_INDEX_BASE_OUTPUT_PATH);
+                }
             }
         }
-    }
 
-    private static final class TermFrequencyRow {
-        private final String documentId;
-        private final int termFrequency;
-
-        private TermFrequencyRow(String documentId, int termFrequency) {
-            this.documentId = documentId;
-            this.termFrequency = termFrequency;
-        }
-
-        private String getDocumentId() {
-            return documentId;
-        }
-
-        private int getTermFrequency() {
-            return termFrequency;
+        @Override
+        protected void cleanup(Context context) throws IOException, InterruptedException {
+            outputs.close();
         }
     }
+
+    private record TermFrequencyRow(String documentId, int termFrequency) {}
 }
