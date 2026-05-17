@@ -3,11 +3,7 @@
     <section class="hero-panel">
       <div class="hero-copy">
         <p class="eyebrow">Hadoop Text Retrieval</p>
-        <h1>Search arXiv abstracts through a local-first TF-IDF pipeline.</h1>
-        <p class="hero-lede">
-          The Spring Boot backend builds the search index directly in local development and keeps a
-          Hadoop/MapReduce pipeline available for cluster analysis.
-        </p>
+        <h1>Search arXiv abstracts through a Hadoop-powered TF-IDF pipeline.</h1>
       </div>
 
       <div class="hero-status">
