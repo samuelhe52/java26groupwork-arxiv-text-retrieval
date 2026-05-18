@@ -33,6 +33,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -44,6 +45,7 @@ public class CorpusIndexService {
 
     private static final List<String> WRAPPED_RECORD_FIELDS =
             List.of("data", "records", "papers", "items", "documents");
+    private static final int MAX_LOCAL_ANALYSIS_WORKERS = 4;
 
     private final CorpusProperties properties;
     private final ObjectMapper objectMapper;
@@ -528,33 +530,14 @@ public class CorpusIndexService {
         }
 
         double maxDocumentFrequency = documents.size() * properties.getIndexMaxDocumentFrequencyRatio();
-        Map<String, PostingAccumulator> postingAccumulators = new HashMap<>();
-        List<List<CorpusResponses.DocumentKeyword>> documentKeywords = new ArrayList<>(documents.size());
-
-        for (int ordinal = 0; ordinal < documents.size(); ordinal++) {
-            Map<String, Integer> termCounts = documentTermFrequencies.get(ordinal);
-            PriorityQueue<KeywordCandidate> topKeywordCandidates =
-                    new PriorityQueue<>(Math.max(1, properties.getDocumentKeywordCount()), CorpusIndexService::compareKeywordCandidates);
-            for (Map.Entry<String, Integer> entry : termCounts.entrySet()) {
-                String term = entry.getKey();
-                int termFrequency = entry.getValue();
-                int df = documentFrequency.getOrDefault(term, 0);
-                if (df <= 0) {
-                    continue;
-                }
-                double score = (1.0d + Math.log(termFrequency))
-                        * (Math.log((documents.size() + 1.0d) / (df + 1.0d)) + 1.0d);
-                collectTopKeywordCandidate(
-                        topKeywordCandidates,
-                        new KeywordCandidate(term, score),
-                        properties.getDocumentKeywordCount());
-                if (df <= maxDocumentFrequency) {
-                    postingAccumulators.computeIfAbsent(term, ignored -> new PostingAccumulator())
-                            .add(ordinal, score);
-                }
-            }
-            documentKeywords.add(freezeKeywordCandidates(topKeywordCandidates));
-        }
+        LocalScoringResult scoringResult = scoreLocalDocuments(
+                documents.size(),
+                documentTermFrequencies,
+                documentFrequency,
+                maxDocumentFrequency,
+                properties.getDocumentKeywordCount());
+        Map<String, PostingAccumulator> postingAccumulators = scoringResult.postingAccumulators();
+        List<List<CorpusResponses.DocumentKeyword>> documentKeywords = scoringResult.documentKeywords();
 
         Map<String, CorpusIndexSnapshot.PostingList> postings = freezePostings(postingAccumulators);
         long indexedPostingCount = postingAccumulators.values().stream()
@@ -617,6 +600,140 @@ public class CorpusIndexService {
                     .sorted()
                     .toList();
         }
+    }
+
+    private LocalScoringResult scoreLocalDocuments(
+            int documentCount,
+            List<Map<String, Integer>> documentTermFrequencies,
+            Map<String, Integer> documentFrequency,
+            double maxDocumentFrequency,
+            int keywordLimit) {
+        int workerCount = localAnalysisWorkerCount(documentCount, Runtime.getRuntime().availableProcessors());
+        if (workerCount <= 1) {
+            return scoreLocalDocumentRange(
+                    0,
+                    documentCount,
+                    documentCount,
+                    documentTermFrequencies,
+                    documentFrequency,
+                    maxDocumentFrequency,
+                    keywordLimit);
+        }
+
+        ExecutorService executor = Executors.newFixedThreadPool(workerCount, task -> {
+            Thread thread = new Thread(task, "local-corpus-analysis");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            List<java.util.concurrent.Callable<LocalScoringChunk>> tasks = new ArrayList<>(workerCount);
+            int chunkSize = Math.max(1, (documentCount + workerCount - 1) / workerCount);
+            for (int startOrdinal = 0; startOrdinal < documentCount; startOrdinal += chunkSize) {
+                int rangeStart = startOrdinal;
+                int rangeEnd = Math.min(documentCount, rangeStart + chunkSize);
+                tasks.add(() -> scoreLocalDocumentChunk(
+                        rangeStart,
+                        rangeEnd,
+                        documentCount,
+                        documentTermFrequencies,
+                        documentFrequency,
+                        maxDocumentFrequency,
+                        keywordLimit));
+            }
+
+            List<Future<LocalScoringChunk>> futures = executor.invokeAll(tasks);
+            List<List<CorpusResponses.DocumentKeyword>> documentKeywords = new ArrayList<>(documentCount);
+            Map<String, PostingAccumulator> postingAccumulators = new HashMap<>();
+            for (Future<LocalScoringChunk> future : futures) {
+                LocalScoringChunk chunk = future.get();
+                documentKeywords.addAll(chunk.documentKeywords());
+                mergePostingAccumulators(postingAccumulators, chunk.postingAccumulators());
+            }
+            return new LocalScoringResult(postingAccumulators, documentKeywords);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Local corpus analysis was interrupted.", exception);
+        } catch (java.util.concurrent.ExecutionException exception) {
+            throw new IllegalStateException("Local corpus analysis failed.", exception.getCause());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private LocalScoringResult scoreLocalDocumentRange(
+            int startOrdinal,
+            int endOrdinal,
+            int documentCount,
+            List<Map<String, Integer>> documentTermFrequencies,
+            Map<String, Integer> documentFrequency,
+            double maxDocumentFrequency,
+            int keywordLimit) {
+        LocalScoringChunk chunk = scoreLocalDocumentChunk(
+                startOrdinal,
+                endOrdinal,
+                documentCount,
+                documentTermFrequencies,
+                documentFrequency,
+                maxDocumentFrequency,
+                keywordLimit);
+        return new LocalScoringResult(chunk.postingAccumulators(), chunk.documentKeywords());
+    }
+
+    private LocalScoringChunk scoreLocalDocumentChunk(
+            int startOrdinal,
+            int endOrdinal,
+            int documentCount,
+            List<Map<String, Integer>> documentTermFrequencies,
+            Map<String, Integer> documentFrequency,
+            double maxDocumentFrequency,
+            int keywordLimit) {
+        Map<String, PostingAccumulator> postingAccumulators = new HashMap<>();
+        List<List<CorpusResponses.DocumentKeyword>> documentKeywords =
+                new ArrayList<>(Math.max(0, endOrdinal - startOrdinal));
+
+        for (int ordinal = startOrdinal; ordinal < endOrdinal; ordinal++) {
+            Map<String, Integer> termCounts = documentTermFrequencies.get(ordinal);
+            PriorityQueue<KeywordCandidate> topKeywordCandidates =
+                    new PriorityQueue<>(Math.max(1, keywordLimit), CorpusIndexService::compareKeywordCandidates);
+            for (Map.Entry<String, Integer> entry : termCounts.entrySet()) {
+                String term = entry.getKey();
+                int termFrequency = entry.getValue();
+                int df = documentFrequency.getOrDefault(term, 0);
+                if (df <= 0) {
+                    continue;
+                }
+                double score = (1.0d + Math.log(termFrequency))
+                        * (Math.log((documentCount + 1.0d) / (df + 1.0d)) + 1.0d);
+                collectTopKeywordCandidate(
+                        topKeywordCandidates,
+                        new KeywordCandidate(term, score),
+                        keywordLimit);
+                if (df <= maxDocumentFrequency) {
+                    postingAccumulators.computeIfAbsent(term, ignored -> new PostingAccumulator())
+                            .add(ordinal, score);
+                }
+            }
+            documentKeywords.add(freezeKeywordCandidates(topKeywordCandidates));
+        }
+
+        return new LocalScoringChunk(postingAccumulators, documentKeywords);
+    }
+
+    private void mergePostingAccumulators(
+            Map<String, PostingAccumulator> target,
+            Map<String, PostingAccumulator> source) {
+        for (Map.Entry<String, PostingAccumulator> entry : source.entrySet()) {
+            target.computeIfAbsent(entry.getKey(), ignored -> new PostingAccumulator())
+                    .addAll(entry.getValue());
+        }
+    }
+
+    static int localAnalysisWorkerCount(int documentCount, int availableProcessors) {
+        if (documentCount <= 1) {
+            return 1;
+        }
+        int processorBudget = Math.max(1, availableProcessors);
+        return Math.max(1, Math.min(Math.min(MAX_LOCAL_ANALYSIS_WORKERS, processorBudget), documentCount));
     }
 
     private void forEachFileLine(
@@ -1277,6 +1394,14 @@ public class CorpusIndexService {
 
     private record KeywordCandidate(String term, double score) {}
 
+    private record LocalScoringResult(
+            Map<String, PostingAccumulator> postingAccumulators,
+            List<List<CorpusResponses.DocumentKeyword>> documentKeywords) {}
+
+    private record LocalScoringChunk(
+            Map<String, PostingAccumulator> postingAccumulators,
+            List<List<CorpusResponses.DocumentKeyword>> documentKeywords) {}
+
     private static final class UploadWriters implements AutoCloseable {
         private final Path yearsDir;
         private final ObjectMapper objectMapper;
@@ -1337,6 +1462,13 @@ public class CorpusIndexService {
             documentOrdinals[size] = documentOrdinal;
             tfIdfScores[size] = (float) tfIdfScore;
             size++;
+        }
+
+        void addAll(PostingAccumulator source) {
+            ensureCapacity(size + source.size);
+            System.arraycopy(source.documentOrdinals, 0, documentOrdinals, size, source.size);
+            System.arraycopy(source.tfIdfScores, 0, tfIdfScores, size, source.size);
+            size += source.size;
         }
 
         int size() {
