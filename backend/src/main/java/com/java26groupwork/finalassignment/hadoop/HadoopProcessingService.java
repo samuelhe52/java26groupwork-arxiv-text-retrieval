@@ -4,22 +4,20 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java26groupwork.finalassignment.corpus.CorpusProperties;
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.mapreduce.Job;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.java26groupwork.finalassignment.hadoop.jobs.DocumentKeywordsJob;
@@ -29,7 +27,9 @@ import com.java26groupwork.finalassignment.hadoop.jobs.TermStatisticsJob;
 @Service
 public class HadoopProcessingService {
 
+    private static final Logger log = LoggerFactory.getLogger(HadoopProcessingService.class);
     private static final int MAX_CLUSTER_NODE_BUDGET = 4;
+    private static final ProcessingProgressReporter NOOP_PROGRESS_REPORTER = progress -> {};
 
     private final HadoopProperties properties;
     private final org.apache.hadoop.conf.Configuration hadoopConfiguration;
@@ -70,26 +70,57 @@ public class HadoopProcessingService {
                 properties.getOutputPath(),
                 properties.getConfigDir(),
                 properties.getReducerTasks(),
-                properties.getJobJar());
+                properties.getJobJar(),
+                properties.getReplicationFactor());
     }
 
     public ProcessingArtifacts processDataset(Path sourceDatasetDir, CorpusProperties corpusProperties) {
+        return processDataset(sourceDatasetDir, corpusProperties, NOOP_PROGRESS_REPORTER);
+    }
+
+    public ProcessingArtifacts processDataset(
+            Path sourceDatasetDir,
+            CorpusProperties corpusProperties,
+            ProcessingProgressReporter progressReporter) {
         if (isLocalMode()) {
             throw new IllegalStateException("Cluster Hadoop processing is not used in local mode.");
         }
         long startNanos = System.nanoTime();
         Instant startedAt = Instant.now();
         org.apache.hadoop.conf.Configuration configuration = new org.apache.hadoop.conf.Configuration(hadoopConfiguration);
+        configuration.setInt("dfs.replication", Math.max(1, properties.getReplicationFactor()));
+        configuration.setInt(
+                "mapreduce.client.submit.file.replication",
+                Math.max(1, properties.getReplicationFactor()));
 
         try {
+            reportProgress(progressReporter, "connect", "Connecting to HDFS/YARN.", 1, 6, 5, startNanos);
+            log.info(
+                    "Starting Hadoop processing for dataset={} mode={} fs={} outputRoot={} configuredInput={} reducerTasks={} replicationFactor={} jobJar={}",
+                    sourceDatasetDir.toAbsolutePath().normalize(),
+                    properties.getMode(),
+                    configuration.get("fs.defaultFS"),
+                    properties.getOutputPath(),
+                    properties.getInputPath(),
+                    properties.getReducerTasks(),
+                    properties.getReplicationFactor(),
+                    properties.getJobJar());
             FileSystem fileSystem = FileSystem.get(configuration);
             WorkPaths workPaths = createWorkPaths();
+            log.info("Preparing Hadoop work directory: {}", workPaths.root());
             deleteIfExists(fileSystem, workPaths.root());
             fileSystem.mkdirs(workPaths.root());
             fileSystem.mkdirs(workPaths.input());
 
+            reportProgress(progressReporter, "stage-input", "Preparing Hadoop input shards.", 2, 6, 10, startNanos);
             StageResult stageResult = stageDataset(sourceDatasetDir, fileSystem, workPaths.input());
+            log.info(
+                    "Hadoop input ready: inputPath={} shardCount={} manifestDocumentCount={}",
+                    stageResult.inputPath(),
+                    stageResult.inputShardCount(),
+                    stageResult.documentCount());
             if (stageResult.documentCount() == 0) {
+                reportProgress(progressReporter, "complete", "Dataset contains zero records; no Hadoop jobs needed.", 6, 6, 100, startNanos);
                 return new ProcessingArtifacts(
                         sourceDatasetDir.toAbsolutePath().normalize(),
                         workPaths.root(),
@@ -106,22 +137,47 @@ public class HadoopProcessingService {
             }
 
             ClusterExecutionPlan executionPlan = clusterExecutionPlan(properties.getReducerTasks());
+            log.info(
+                    "Hadoop execution plan: termStatisticsReducers={} scoredTermsReducers={} documentKeywordsReducers={}",
+                    executionPlan.termStatisticsReducers(),
+                    executionPlan.scoredTermsReducers(),
+                    executionPlan.documentKeywordsReducers());
 
+            reportProgress(progressReporter, "term-statistics", "Submitting term statistics job.", 3, 6, 18, startNanos);
             Job termStatisticsJob = TermStatisticsJob.createJob(
                     new org.apache.hadoop.conf.Configuration(configuration),
                     stageResult.inputPath(),
                     workPaths.termStatisticsRoot());
             applyJobJar(termStatisticsJob);
             applyReducerTasks(termStatisticsJob, executionPlan.termStatisticsReducers());
-            runJob(termStatisticsJob);
+            runJob(termStatisticsJob, progressReporter, startNanos, 3, 6, 18, 45);
             ensureDirectoriesExist(fileSystem, workPaths.termFrequency(), workPaths.documentFrequency());
+            int documentCount = resolveProcessedDocumentCount(termStatisticsJob, stageResult);
+            log.info("Term statistics completed: processedDocumentCount={}", documentCount);
+            if (documentCount == 0) {
+                reportProgress(progressReporter, "complete", "No tokenized documents were produced; index will be empty.", 6, 6, 100, startNanos);
+                return new ProcessingArtifacts(
+                        sourceDatasetDir.toAbsolutePath().normalize(),
+                        workPaths.root(),
+                        stageResult.inputPath(),
+                        workPaths.termFrequency(),
+                        workPaths.documentFrequency(),
+                        workPaths.tfIdf(),
+                        workPaths.documentKeywords(),
+                        workPaths.invertedIndex(),
+                        startedAt,
+                        elapsedMillis(startNanos),
+                        0,
+                        List.copyOf(stageResult.warnings()));
+            }
 
             org.apache.hadoop.conf.Configuration scoredTermsConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
-            scoredTermsConfiguration.setInt(ScoredTermsJob.DOCUMENT_COUNT_KEY, stageResult.documentCount());
+            scoredTermsConfiguration.setInt(ScoredTermsJob.DOCUMENT_COUNT_KEY, documentCount);
             scoredTermsConfiguration.setDouble(
                     ScoredTermsJob.MAX_DOCUMENT_FREQUENCY_RATIO_KEY,
                     corpusProperties.getIndexMaxDocumentFrequencyRatio());
+            reportProgress(progressReporter, "scored-terms", "Submitting TF-IDF and inverted-index job.", 4, 6, 48, startNanos);
             Job scoredTermsJob = ScoredTermsJob.createJob(
                     scoredTermsConfiguration,
                     workPaths.termFrequency(),
@@ -129,20 +185,22 @@ public class HadoopProcessingService {
                     workPaths.scoredTermsRoot());
             applyJobJar(scoredTermsJob);
             applyReducerTasks(scoredTermsJob, executionPlan.scoredTermsReducers());
-            runJob(scoredTermsJob);
+            runJob(scoredTermsJob, progressReporter, startNanos, 4, 6, 48, 72);
             ensureDirectoriesExist(fileSystem, workPaths.tfIdf(), workPaths.invertedIndex());
 
             org.apache.hadoop.conf.Configuration keywordsConfiguration =
                     new org.apache.hadoop.conf.Configuration(configuration);
             keywordsConfiguration.setInt(
                     DocumentKeywordsJob.KEYWORD_LIMIT_KEY, corpusProperties.getDocumentKeywordCount());
+            reportProgress(progressReporter, "document-keywords", "Submitting per-document keyword job.", 5, 6, 74, startNanos);
             Job documentKeywordsJob = DocumentKeywordsJob.createJob(
                     keywordsConfiguration,
                     workPaths.tfIdf(),
                     workPaths.documentKeywords());
             applyJobJar(documentKeywordsJob);
             applyReducerTasks(documentKeywordsJob, executionPlan.documentKeywordsReducers());
-            runJob(documentKeywordsJob);
+            runJob(documentKeywordsJob, progressReporter, startNanos, 5, 6, 74, 92);
+            reportProgress(progressReporter, "snapshot", "Reading Hadoop outputs into the backend search snapshot.", 6, 6, 94, startNanos);
 
             return new ProcessingArtifacts(
                     sourceDatasetDir.toAbsolutePath().normalize(),
@@ -155,9 +213,10 @@ public class HadoopProcessingService {
                     workPaths.invertedIndex(),
                     startedAt,
                     elapsedMillis(startNanos),
-                    stageResult.documentCount(),
+                    documentCount,
                     List.copyOf(stageResult.warnings()));
         } catch (Exception exception) {
+            log.error("Hadoop processing pipeline failed.", exception);
             throw new IllegalStateException("Failed to execute Hadoop processing pipeline.", exception);
         }
     }
@@ -237,28 +296,26 @@ public class HadoopProcessingService {
     }
 
     private StageResult stageLocalDataset(
-            Path yearsDir, FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory) throws IOException {
+            Path shardDirectory, FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory) throws IOException {
         List<String> warnings = new ArrayList<>();
-        Set<String> seenDocumentIds = new LinkedHashSet<>();
-        int documentCount = 0;
-
-        try (StagingWriters writers = new StagingWriters(fileSystem, inputDirectory)) {
-            List<Path> shards;
-            try (var stream = Files.list(yearsDir)) {
-                shards = stream
-                        .filter(path -> path.getFileName().toString().endsWith(".jsonl"))
-                        .sorted()
-                        .toList();
-            }
-
-            for (Path shard : shards) {
-                try (BufferedReader reader = Files.newBufferedReader(shard, StandardCharsets.UTF_8)) {
-                    documentCount += stageRecords(reader, writers, warnings, seenDocumentIds);
-                }
-            }
-
-            return new StageResult(inputDirectory, documentCount, shards.size(), limitWarnings(warnings));
+        List<Path> shards;
+        try (var stream = Files.list(shardDirectory)) {
+            shards = stream
+                    .filter(path -> path.getFileName().toString().endsWith(".jsonl"))
+                    .sorted()
+                    .toList();
         }
+        for (Path shard : shards) {
+            org.apache.hadoop.fs.Path destination =
+                    new org.apache.hadoop.fs.Path(inputDirectory, shard.getFileName().toString());
+            log.info("Copying local dataset shard to HDFS: source={} destination={}", shard, destination);
+            fileSystem.copyFromLocalFile(false, true, new org.apache.hadoop.fs.Path(shard.toUri()), destination);
+        }
+        return new StageResult(
+                inputDirectory,
+                resolveLocalManifestDocumentCountOrUnknown(shardDirectory),
+                shards.size(),
+                limitWarnings(warnings));
     }
 
     private StageResult stageClusterDataset(FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory)
@@ -275,6 +332,11 @@ public class HadoopProcessingService {
 
         PreparedClusterInput preparedClusterInput = resolvePreparedClusterInput(fileSystem, sourceInputPath);
         if (preparedClusterInput != null) {
+            log.info(
+                    "Using prepared HDFS input directly: inputPath={} shardCount={} manifestDocumentCount={}",
+                    preparedClusterInput.inputPath(),
+                    preparedClusterInput.inputShardCount(),
+                    preparedClusterInput.documentCount());
             return new StageResult(
                     preparedClusterInput.inputPath(),
                     preparedClusterInput.documentCount(),
@@ -282,63 +344,28 @@ public class HadoopProcessingService {
                     List.of());
         }
 
-        List<String> warnings = new ArrayList<>();
-        Set<String> seenDocumentIds = new LinkedHashSet<>();
-        int documentCount = 0;
         List<org.apache.hadoop.fs.Path> shards = listJsonlInputs(fileSystem, sourceInputPath);
         if (shards.isEmpty()) {
             throw new IllegalArgumentException(
                     "Configured Hadoop input path must be a .jsonl file, a shard directory, or a dataset root with years/ shards: "
                             + sourceInputPath);
         }
-
-        try (StagingWriters writers = new StagingWriters(fileSystem, inputDirectory)) {
-            for (org.apache.hadoop.fs.Path shard : shards) {
-                try (BufferedReader reader = new BufferedReader(
-                        new java.io.InputStreamReader(fileSystem.open(shard), StandardCharsets.UTF_8))) {
-                    documentCount += stageRecords(reader, writers, warnings, seenDocumentIds);
-                }
-            }
-
-            return new StageResult(inputDirectory, documentCount, shards.size(), limitWarnings(warnings));
+        for (org.apache.hadoop.fs.Path shard : shards) {
+            org.apache.hadoop.fs.Path destination =
+                    new org.apache.hadoop.fs.Path(inputDirectory, shard.getName());
+            log.info("Copying HDFS dataset shard: source={} destination={}", shard, destination);
+            FileUtil.copy(fileSystem, shard, fileSystem, destination, false, hadoopConfiguration);
         }
-    }
-
-    private int stageRecords(
-            BufferedReader reader,
-            StagingWriters writers,
-            List<String> warnings,
-            Set<String> seenDocumentIds) throws IOException {
-        int documentCount = 0;
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (line.isBlank()) {
-                continue;
-            }
-            JsonNode node = objectMapper.readTree(line);
-            String documentId = node.path("id").asText("").trim();
-            if (documentId.isBlank()) {
-                warnings.add("Skipped a record with a blank id while staging Hadoop input.");
-                continue;
-            }
-            if (!seenDocumentIds.add(documentId)) {
-                warnings.add("Skipped duplicate document id during staging: " + documentId);
-                continue;
-            }
-            int year = node.path("year").asInt(0);
-            writers.write(year, line);
-            documentCount++;
-        }
-        return documentCount;
+        return new StageResult(inputDirectory, -1, shards.size(), List.of());
     }
 
     private PreparedClusterInput resolvePreparedClusterInput(
             FileSystem fileSystem, org.apache.hadoop.fs.Path sourceInputPath) throws IOException {
         List<org.apache.hadoop.fs.Path> directShards = listJsonlInputs(fileSystem, sourceInputPath);
-        if (!directShards.isEmpty() && canReusePreparedClusterInput(fileSystem, sourceInputPath)) {
+        if (!directShards.isEmpty()) {
             return new PreparedClusterInput(
                     sourceInputPath,
-                    resolveDocumentCount(fileSystem, sourceInputPath, directShards),
+                    resolveManifestDocumentCountOrUnknown(fileSystem, sourceInputPath),
                     directShards.size());
         }
 
@@ -347,30 +374,35 @@ public class HadoopProcessingService {
         if (!yearShards.isEmpty()) {
             return new PreparedClusterInput(
                     yearsPath,
-                    resolveDocumentCount(fileSystem, yearsPath, yearShards),
+                    resolveManifestDocumentCountOrUnknown(fileSystem, yearsPath),
                     yearShards.size());
         }
         return null;
     }
 
-    private boolean canReusePreparedClusterInput(FileSystem fileSystem, org.apache.hadoop.fs.Path inputPath)
+    private int resolveManifestDocumentCountOrUnknown(FileSystem fileSystem, org.apache.hadoop.fs.Path inputPath)
             throws IOException {
-        String fileName = inputPath.getName();
-        if ("years".equals(fileName)) {
-            return true;
-        }
-        return readManifestDocumentCount(fileSystem, inputPath) != null;
-    }
-
-    private int resolveDocumentCount(
-            FileSystem fileSystem,
-            org.apache.hadoop.fs.Path inputPath,
-            List<org.apache.hadoop.fs.Path> shards) throws IOException {
         Integer manifestDocumentCount = readManifestDocumentCount(fileSystem, inputPath);
         if (manifestDocumentCount != null && manifestDocumentCount >= 0) {
             return manifestDocumentCount;
         }
-        return countNonBlankLines(fileSystem, shards);
+        return -1;
+    }
+
+    private int resolveLocalManifestDocumentCountOrUnknown(Path shardDirectory) throws IOException {
+        Path manifestPath = shardDirectory.resolve("manifest.json");
+        if (!Files.exists(manifestPath)) {
+            Path parent = shardDirectory.getParent();
+            manifestPath = parent == null ? manifestPath : parent.resolve("manifest.json");
+        }
+        if (!Files.exists(manifestPath)) {
+            return -1;
+        }
+        try (BufferedReader reader = Files.newBufferedReader(manifestPath, StandardCharsets.UTF_8)) {
+            JsonNode totals = objectMapper.readTree(reader).path("totals");
+            JsonNode records = totals.path("records");
+            return records.canConvertToInt() ? records.asInt() : -1;
+        }
     }
 
     private Integer readManifestDocumentCount(FileSystem fileSystem, org.apache.hadoop.fs.Path inputPath)
@@ -400,22 +432,6 @@ public class HadoopProcessingService {
         return null;
     }
 
-    private int countNonBlankLines(FileSystem fileSystem, List<org.apache.hadoop.fs.Path> shards) throws IOException {
-        int documentCount = 0;
-        for (org.apache.hadoop.fs.Path shard : shards) {
-            try (BufferedReader reader = new BufferedReader(
-                    new java.io.InputStreamReader(fileSystem.open(shard), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!line.isBlank()) {
-                        documentCount++;
-                    }
-                }
-            }
-        }
-        return documentCount;
-    }
-
     private List<org.apache.hadoop.fs.Path> listJsonlInputs(
             FileSystem fileSystem, org.apache.hadoop.fs.Path inputPath) throws IOException {
         if (!fileSystem.exists(inputPath)) {
@@ -439,10 +455,95 @@ public class HadoopProcessingService {
         return List.copyOf(shards);
     }
 
-    private void runJob(Job job) throws IOException, ClassNotFoundException, InterruptedException {
-        if (!job.waitForCompletion(true)) {
+    private void runJob(
+            Job job,
+            ProcessingProgressReporter progressReporter,
+            long pipelineStartNanos,
+            int currentStep,
+            int totalSteps,
+            int startPercent,
+            int endPercent)
+            throws IOException, ClassNotFoundException, InterruptedException {
+        String inputPaths = job.getConfiguration().get("mapreduce.input.fileinputformat.inputdir", "n/a");
+        String outputPath = job.getConfiguration().get("mapreduce.output.fileoutputformat.outputdir", "n/a");
+        log.info(
+                "Submitting Hadoop job: name={} reducers={} jar={} input={} output={}",
+                job.getJobName(),
+                job.getNumReduceTasks(),
+                job.getJar(),
+                inputPaths,
+                outputPath);
+        reportProgress(
+                progressReporter,
+                jobProgressStage(job),
+                "Submitting " + job.getJobName() + ".",
+                currentStep,
+                totalSteps,
+                startPercent,
+                pipelineStartNanos);
+
+        job.submit();
+        log.info(
+                "Hadoop job submitted: name={} jobId={} trackingUrl={}",
+                job.getJobName(),
+                job.getJobID(),
+                job.getTrackingURL());
+
+        while (!job.isComplete()) {
+            float mapProgress = job.mapProgress();
+            float reduceProgress = job.reduceProgress();
+            int percent = interpolateProgress(startPercent, endPercent, mapProgress, reduceProgress);
+            String message = "%s running: map %.0f%%, reduce %.0f%%"
+                    .formatted(job.getJobName(), mapProgress * 100.0f, reduceProgress * 100.0f);
+            reportProgress(
+                    progressReporter,
+                    jobProgressStage(job),
+                    message,
+                    currentStep,
+                    totalSteps,
+                    percent,
+                    pipelineStartNanos);
+            log.info(
+                    "Hadoop job progress: name={} jobId={} state={} map={} reduce={} trackingUrl={}",
+                    job.getJobName(),
+                    job.getJobID(),
+                    job.getJobState(),
+                    String.format(java.util.Locale.ROOT, "%.1f%%", mapProgress * 100.0f),
+                    String.format(java.util.Locale.ROOT, "%.1f%%", reduceProgress * 100.0f),
+                    job.getTrackingURL());
+            Thread.sleep(5_000L);
+        }
+
+        boolean successful = job.isSuccessful();
+        log.info(
+                "Hadoop job finished: name={} jobId={} successful={} state={} map={} reduce={}",
+                job.getJobName(),
+                job.getJobID(),
+                successful,
+                job.getJobState(),
+                String.format(java.util.Locale.ROOT, "%.1f%%", job.mapProgress() * 100.0f),
+                String.format(java.util.Locale.ROOT, "%.1f%%", job.reduceProgress() * 100.0f));
+        reportProgress(
+                progressReporter,
+                jobProgressStage(job),
+                job.getJobName() + (successful ? " completed." : " failed."),
+                currentStep,
+                totalSteps,
+                successful ? endPercent : startPercent,
+                pipelineStartNanos);
+
+        if (!successful) {
             throw new IllegalStateException("Hadoop job failed: " + job.getJobName());
         }
+    }
+
+    private String jobProgressStage(Job job) {
+        return job.getJobName().replace("arxiv-", "");
+    }
+
+    private int interpolateProgress(int startPercent, int endPercent, float mapProgress, float reduceProgress) {
+        float jobProgress = (mapProgress * 0.55f) + (reduceProgress * 0.45f);
+        return Math.max(startPercent, Math.min(endPercent, Math.round(startPercent + ((endPercent - startPercent) * jobProgress))));
     }
 
     private void applyReducerTasks(Job job, int reducerTasks) {
@@ -457,6 +558,19 @@ public class HadoopProcessingService {
             return;
         }
         job.setJar(configuredJobJar);
+    }
+
+    private int resolveProcessedDocumentCount(Job termStatisticsJob, StageResult stageResult) throws IOException {
+        if (stageResult.documentCount() >= 0) {
+            return stageResult.documentCount();
+        }
+        long counterValue = termStatisticsJob.getCounters()
+                .findCounter(TermStatisticsJob.Counters.DOCUMENTS)
+                .getValue();
+        if (counterValue > Integer.MAX_VALUE) {
+            throw new IllegalStateException("Hadoop input contains too many documents: " + counterValue);
+        }
+        return (int) counterValue;
     }
 
     // The merged pipeline now runs three sequential jobs, so each stage can use the
@@ -490,6 +604,38 @@ public class HadoopProcessingService {
     private static long elapsedMillis(long startNanos) {
         return Math.round((System.nanoTime() - startNanos) / 1_000_000.0d);
     }
+
+    private void reportProgress(
+            ProcessingProgressReporter progressReporter,
+            String stage,
+            String message,
+            int currentStep,
+            int totalSteps,
+            int percent,
+            long startNanos) {
+        progressReporter.report(new ProcessingProgress(
+                stage,
+                message,
+                currentStep,
+                totalSteps,
+                Math.max(0, Math.min(100, percent)),
+                elapsedMillis(startNanos),
+                Instant.now()));
+    }
+
+    @FunctionalInterface
+    public interface ProcessingProgressReporter {
+        void report(ProcessingProgress progress);
+    }
+
+    public record ProcessingProgress(
+            String stage,
+            String message,
+            int currentStep,
+            int totalSteps,
+            int percent,
+            long elapsedMillis,
+            Instant updatedAt) {}
 
     public record ProcessingArtifacts(
             Path sourceDatasetDir,
@@ -533,49 +679,4 @@ public class HadoopProcessingService {
             int scoredTermsReducers,
             int documentKeywordsReducers) {}
 
-    private static final class StagingWriters implements AutoCloseable {
-        private final FileSystem fileSystem;
-        private final org.apache.hadoop.fs.Path inputDirectory;
-        private final java.util.Map<Integer, BufferedWriter> writers = new java.util.HashMap<>();
-
-        private StagingWriters(FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory) {
-            this.fileSystem = fileSystem;
-            this.inputDirectory = inputDirectory;
-        }
-
-        private void write(int year, String jsonLine) throws IOException {
-            BufferedWriter writer = writers.computeIfAbsent(year, this::openWriter);
-            writer.write(jsonLine);
-            writer.newLine();
-        }
-
-        private BufferedWriter openWriter(int year) {
-            org.apache.hadoop.fs.Path shardPath =
-                    new org.apache.hadoop.fs.Path(inputDirectory, String.format("year_%04d.jsonl", Math.max(0, year)));
-            try {
-                return new BufferedWriter(new OutputStreamWriter(fileSystem.create(shardPath, true), StandardCharsets.UTF_8));
-            } catch (IOException exception) {
-                throw new UncheckedIOException("Failed to create staged Hadoop input shard: " + shardPath, exception);
-            }
-        }
-
-        @Override
-        public void close() throws IOException {
-            IOException failure = null;
-            for (BufferedWriter writer : writers.values()) {
-                try {
-                    writer.close();
-                } catch (IOException exception) {
-                    if (failure == null) {
-                        failure = exception;
-                    } else {
-                        failure.addSuppressed(exception);
-                    }
-                }
-            }
-            if (failure != null) {
-                throw failure;
-            }
-        }
-    }
 }

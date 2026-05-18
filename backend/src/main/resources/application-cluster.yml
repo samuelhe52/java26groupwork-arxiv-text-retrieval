@@ -3,4 +3,5 @@ app:
     mode: cluster
     config-dir: ${HADOOP_CONF_DIR:${HADOOP_HOME:${user.home}/hadoop}/etc/hadoop}
     reducer-tasks: 4
+    replication-factor: ${APP_HADOOP_REPLICATION_FACTOR:1}
     job-jar: ${APP_HADOOP_JOB_JAR:${user.dir}/target/final-assignment-backend-0.0.1-SNAPSHOT.jar.original}

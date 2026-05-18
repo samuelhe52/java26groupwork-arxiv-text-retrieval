@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.autoconfigure.web.servlet.MultipartProperties;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -38,6 +39,9 @@ class CorpusControllerTest {
 
     @Autowired
     private CorpusIndexService corpusIndexService;
+
+    @TempDir
+    private Path tempDir;
 
     @DynamicPropertySource
     static void registerProperties(DynamicPropertyRegistry registry) {
@@ -92,7 +96,8 @@ class CorpusControllerTest {
         org.mockito.Mockito.when(processingService.configuredDatasetDir()).thenReturn(configuredDatasetDir);
         org.mockito.Mockito.when(processingService.processDataset(
                         org.mockito.ArgumentMatchers.eq(configuredDatasetDir),
-                        org.mockito.ArgumentMatchers.same(properties)))
+                        org.mockito.ArgumentMatchers.same(properties),
+                        org.mockito.ArgumentMatchers.any()))
                 .thenReturn(new HadoopProcessingService.ProcessingArtifacts(
                         configuredDatasetDir,
                         new org.apache.hadoop.fs.Path("file:/tmp/work"),
@@ -119,7 +124,42 @@ class CorpusControllerTest {
             org.mockito.Mockito.verify(processingService, org.mockito.Mockito.timeout(1000))
                     .processDataset(
                             org.mockito.ArgumentMatchers.eq(configuredDatasetDir),
-                            org.mockito.ArgumentMatchers.same(properties));
+                            org.mockito.ArgumentMatchers.same(properties),
+                            org.mockito.ArgumentMatchers.any());
+        } finally {
+            freshService.destroy();
+        }
+    }
+
+    @Test
+    void uploadWritesFlatCanonicalShardAndManifest() throws Exception {
+        CorpusProperties properties = new CorpusProperties();
+        properties.setUploadBaseDir(tempDir.toString());
+        ObjectMapper objectMapper = new ObjectMapper();
+        HadoopProcessingService processingService = org.mockito.Mockito.mock(HadoopProcessingService.class);
+        CorpusIndexService freshService = new CorpusIndexService(properties, objectMapper, processingService);
+        try {
+            MockMultipartFile file = new MockMultipartFile(
+                    "files",
+                    "fresh.jsonl",
+                    "application/json",
+                    """
+                    {"id":"2602.00001","title":"Uploaded Paper","abstract":"fresh upload pipeline","year":2026}
+                    {"id":"2602.00002","title":"Another Paper","abstract":"flat canonical shard","year":2026}
+                    """.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+            var response = freshService.importUploadedCorpus(List.of(file));
+            Path datasetDir = Path.of(response.getDatasetDir());
+
+            org.assertj.core.api.Assertions.assertThat(Files.exists(datasetDir.resolve("upload.jsonl"))).isTrue();
+            org.assertj.core.api.Assertions.assertThat(Files.exists(datasetDir.resolve("manifest.json"))).isTrue();
+            org.assertj.core.api.Assertions.assertThat(Files.exists(datasetDir.resolve("years"))).isFalse();
+            org.assertj.core.api.Assertions.assertThat(
+                            objectMapper.readTree(datasetDir.resolve("manifest.json").toFile())
+                                    .path("totals")
+                                    .path("records")
+                                    .asLong())
+                    .isEqualTo(2L);
         } finally {
             freshService.destroy();
         }

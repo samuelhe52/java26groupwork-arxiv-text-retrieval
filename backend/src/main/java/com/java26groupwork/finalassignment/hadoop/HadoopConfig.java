@@ -30,6 +30,11 @@ public class HadoopConfig {
             configuration.addResource(new org.apache.hadoop.fs.Path(yarnSite.toUri()));
         }
 
+        configuration.setInt("dfs.replication", Math.max(1, properties.getReplicationFactor()));
+        configuration.setInt(
+                "mapreduce.client.submit.file.replication",
+                Math.max(1, properties.getReplicationFactor()));
+
         return configuration;
     }
 

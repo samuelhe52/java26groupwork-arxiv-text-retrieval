@@ -37,12 +37,15 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 @Service
 public class CorpusIndexService {
 
+    private static final Logger log = LoggerFactory.getLogger(CorpusIndexService.class);
     private static final List<String> WRAPPED_RECORD_FIELDS =
             List.of("data", "records", "papers", "items", "documents");
     private static final int MAX_LOCAL_ANALYSIS_WORKERS = 4;
@@ -56,6 +59,7 @@ public class CorpusIndexService {
     private volatile boolean reloadInProgress;
     private volatile Instant reloadRequestedAt;
     private volatile String lastReloadError;
+    private volatile CorpusResponses.CorpusBuildProgress reloadProgress;
 
     public CorpusIndexService(
             CorpusProperties properties,
@@ -79,14 +83,26 @@ public class CorpusIndexService {
     public synchronized CorpusResponses.CorpusBuildSummary reload() {
         Path datasetDir = requireActiveDatasetDir();
         try {
+            startProgress("starting", "Preparing corpus analysis.", 1, 6, 3);
+            log.info("Starting corpus analysis: dataset={} mode={}", datasetDir, hadoopProcessingService.describe());
             this.snapshot = hadoopProcessingService.isLocalMode()
                     ? buildLocalSnapshot(datasetDir)
-                    : buildSnapshot(hadoopProcessingService.processDataset(datasetDir, properties));
+                    : buildSnapshot(hadoopProcessingService.processDataset(
+                            datasetDir,
+                            properties,
+                            this::updateReloadProgress));
             this.lastReloadError = null;
+            log.info(
+                    "Corpus analysis completed: dataset={} status={} documents={} buildMillis={}",
+                    datasetDir,
+                    snapshot.buildSummary.getStatus(),
+                    snapshot.recordCount(),
+                    snapshot.buildSummary.getBuildMillis());
             return snapshot.buildSummary;
         } finally {
             this.reloadInProgress = false;
             this.reloadRequestedAt = null;
+            this.reloadProgress = null;
         }
     }
 
@@ -99,6 +115,8 @@ public class CorpusIndexService {
         reloadInProgress = true;
         reloadRequestedAt = Instant.now();
         lastReloadError = null;
+        startProgress("queued", "Analysis request accepted; waiting for the background worker.", 0, 6, 1);
+        log.info("Corpus analysis requested: dataset={}", activeDatasetDir);
 
         reloadExecutor.execute(() -> {
             try {
@@ -107,7 +125,9 @@ public class CorpusIndexService {
                 lastReloadError = exception.getMessage() == null
                         ? exception.getClass().getSimpleName()
                         : exception.getMessage();
+                log.error("Corpus analysis failed: dataset={} error={}", activeDatasetDir, lastReloadError, exception);
                 reloadInProgress = false;
+                reloadProgress = null;
             }
         });
         return buildSummary();
@@ -129,18 +149,20 @@ public class CorpusIndexService {
         }
 
         Path uploadDatasetDir = createUploadDatasetDir();
-        Path yearsDir = uploadDatasetDir.resolve("years");
         List<String> uploadedFiles = new ArrayList<>(nonEmptyFiles.size());
         List<String> warnings = new ArrayList<>();
         AtomicLong importedRecordCount = new AtomicLong();
 
         try {
-            Files.createDirectories(yearsDir);
-            for (MultipartFile file : nonEmptyFiles) {
-                String filename = file.getOriginalFilename() == null ? "upload" : file.getOriginalFilename().trim();
-                uploadedFiles.add(filename.isBlank() ? "upload" : filename);
-                importFile(file, yearsDir, warnings, importedRecordCount);
+            Files.createDirectories(uploadDatasetDir);
+            try (UploadWriter writer = new UploadWriter(uploadDatasetDir.resolve("upload.jsonl"), objectMapper)) {
+                for (MultipartFile file : nonEmptyFiles) {
+                    String filename = file.getOriginalFilename() == null ? "upload" : file.getOriginalFilename().trim();
+                    uploadedFiles.add(filename.isBlank() ? "upload" : filename);
+                    importFile(file, writer, warnings, importedRecordCount);
+                }
             }
+            writeUploadManifest(uploadDatasetDir, importedRecordCount.get(), 1);
         } catch (IOException exception) {
             throw new UncheckedIOException(describeUploadImportFailure(exception), exception);
         }
@@ -825,7 +847,30 @@ public class CorpusIndexService {
                 current.buildSummary.getVocabularySize(),
                 current.buildSummary.getIndexedTermCount(),
                 current.buildSummary.getIndexedPostingCount(),
-                limitWarnings(warnings));
+                limitWarnings(warnings),
+                reloadProgress);
+    }
+
+    private void startProgress(String stage, String message, int currentStep, int totalSteps, int percent) {
+        reloadProgress = new CorpusResponses.CorpusBuildProgress(
+                stage,
+                message,
+                currentStep,
+                totalSteps,
+                percent,
+                0L,
+                Instant.now());
+    }
+
+    private void updateReloadProgress(HadoopProcessingService.ProcessingProgress progress) {
+        reloadProgress = new CorpusResponses.CorpusBuildProgress(
+                progress.stage(),
+                progress.message(),
+                progress.currentStep(),
+                progress.totalSteps(),
+                progress.percent(),
+                progress.elapsedMillis(),
+                progress.updatedAt());
     }
 
     private List<String> distinctTerms(List<String> terms) {
@@ -1082,17 +1127,17 @@ public class CorpusIndexService {
 
     private void importFile(
             MultipartFile file,
-            Path yearsDir,
+            UploadWriter writer,
             List<String> warnings,
             AtomicLong importedRecordCount) throws IOException {
         String originalFilename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename().trim();
         String lowercaseName = originalFilename.toLowerCase(Locale.ROOT);
         if (lowercaseName.endsWith(".jsonl")) {
-            importJsonLines(file, yearsDir, warnings, importedRecordCount);
+            importJsonLines(file, writer, warnings, importedRecordCount);
             return;
         }
         if (lowercaseName.endsWith(".json")) {
-            importJson(file, yearsDir, warnings, importedRecordCount);
+            importJson(file, writer, warnings, importedRecordCount);
             return;
         }
         throw new IllegalArgumentException("Unsupported file type: " + originalFilename + ". Use .json or .jsonl.");
@@ -1100,18 +1145,17 @@ public class CorpusIndexService {
 
     private void importJsonLines(
             MultipartFile file,
-            Path yearsDir,
+            UploadWriter writer,
             List<String> warnings,
             AtomicLong importedRecordCount) throws IOException {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8));
-                UploadWriters writers = new UploadWriters(yearsDir, objectMapper)) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
                 JsonNode node = readUploadNode(line, file.getOriginalFilename());
-                if (writeUploadedRecord(node, writers, warnings)) {
+                if (writeUploadedRecord(node, writer, warnings)) {
                     importedRecordCount.incrementAndGet();
                 }
             }
@@ -1120,28 +1164,26 @@ public class CorpusIndexService {
 
     private void importJson(
             MultipartFile file,
-            Path yearsDir,
+            UploadWriter writer,
             List<String> warnings,
             AtomicLong importedRecordCount) throws IOException {
-        try (UploadWriters writers = new UploadWriters(yearsDir, objectMapper)) {
-            try (JsonParser parser = objectMapper.getFactory().createParser(file.getInputStream())) {
-                JsonToken firstToken = parser.nextToken();
-                if (firstToken == JsonToken.START_ARRAY) {
-                    streamJsonArray(parser, writers, warnings, importedRecordCount);
-                    return;
-                }
-            }
-
-            String wrappedField = detectWrappedArrayField(file);
-            if (wrappedField != null) {
-                streamWrappedJsonArray(file, wrappedField, writers, warnings, importedRecordCount);
+        try (JsonParser parser = objectMapper.getFactory().createParser(file.getInputStream())) {
+            JsonToken firstToken = parser.nextToken();
+            if (firstToken == JsonToken.START_ARRAY) {
+                streamJsonArray(parser, writer, warnings, importedRecordCount);
                 return;
             }
+        }
 
-            JsonNode root = objectMapper.readTree(file.getInputStream());
-            if (writeUploadedRecord(root, writers, warnings)) {
-                importedRecordCount.incrementAndGet();
-            }
+        String wrappedField = detectWrappedArrayField(file);
+        if (wrappedField != null) {
+            streamWrappedJsonArray(file, wrappedField, writer, warnings, importedRecordCount);
+            return;
+        }
+
+        JsonNode root = objectMapper.readTree(file.getInputStream());
+        if (writeUploadedRecord(root, writer, warnings)) {
+            importedRecordCount.incrementAndGet();
         }
     }
 
@@ -1165,7 +1207,7 @@ public class CorpusIndexService {
     private void streamWrappedJsonArray(
             MultipartFile file,
             String wrappedField,
-            UploadWriters writers,
+            UploadWriter writer,
             List<String> warnings,
             AtomicLong importedRecordCount) throws IOException {
         try (JsonParser parser = objectMapper.getFactory().createParser(file.getInputStream())) {
@@ -1180,10 +1222,10 @@ public class CorpusIndexService {
                     continue;
                 }
                 if (valueToken == JsonToken.START_ARRAY) {
-                    streamJsonArray(parser, writers, warnings, importedRecordCount);
+                    streamJsonArray(parser, writer, warnings, importedRecordCount);
                 } else if (valueToken == JsonToken.START_OBJECT) {
                     JsonNode node = objectMapper.readTree(parser);
-                    if (writeUploadedRecord(node, writers, warnings)) {
+                    if (writeUploadedRecord(node, writer, warnings)) {
                         importedRecordCount.incrementAndGet();
                     }
                 }
@@ -1194,12 +1236,12 @@ public class CorpusIndexService {
 
     private void streamJsonArray(
             JsonParser parser,
-            UploadWriters writers,
+            UploadWriter writer,
             List<String> warnings,
             AtomicLong importedRecordCount) throws IOException {
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             JsonNode node = objectMapper.readTree(parser);
-            if (writeUploadedRecord(node, writers, warnings)) {
+            if (writeUploadedRecord(node, writer, warnings)) {
                 importedRecordCount.incrementAndGet();
             }
         }
@@ -1241,7 +1283,7 @@ public class CorpusIndexService {
         return null;
     }
 
-    private boolean writeUploadedRecord(JsonNode rawNode, UploadWriters writers, List<String> warnings)
+    private boolean writeUploadedRecord(JsonNode rawNode, UploadWriter writer, List<String> warnings)
             throws IOException {
         if (rawNode == null || !rawNode.isObject()) {
             warnings.add("Skipped a non-object JSON record.");
@@ -1253,8 +1295,16 @@ public class CorpusIndexService {
             warnings.add("Skipped a record missing id, title, or abstract.");
             return false;
         }
-        writers.write(normalizedNode.path("year").asInt(0), normalizedNode);
+        writer.write(normalizedNode);
         return true;
+    }
+
+    private void writeUploadManifest(Path datasetDir, long recordCount, int shardCount) throws IOException {
+        ObjectNode root = objectMapper.createObjectNode();
+        ObjectNode totals = root.putObject("totals");
+        totals.put("records", recordCount);
+        totals.put("shards", shardCount);
+        objectMapper.writerWithDefaultPrettyPrinter().writeValue(datasetDir.resolve("manifest.json").toFile(), root);
     }
 
     private JsonNode normalizeUploadedRecord(JsonNode node) {
@@ -1402,53 +1452,28 @@ public class CorpusIndexService {
             Map<String, PostingAccumulator> postingAccumulators,
             List<List<CorpusResponses.DocumentKeyword>> documentKeywords) {}
 
-    private static final class UploadWriters implements AutoCloseable {
-        private final Path yearsDir;
+    private static final class UploadWriter implements AutoCloseable {
         private final ObjectMapper objectMapper;
-        private final Map<Integer, BufferedWriter> writers = new HashMap<>();
+        private final BufferedWriter writer;
 
-        private UploadWriters(Path yearsDir, ObjectMapper objectMapper) {
-            this.yearsDir = yearsDir;
+        private UploadWriter(Path shardPath, ObjectMapper objectMapper) throws IOException {
             this.objectMapper = objectMapper;
+            this.writer = Files.newBufferedWriter(
+                    shardPath,
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE);
         }
 
-        private void write(int year, JsonNode node) throws IOException {
-            BufferedWriter writer = writers.computeIfAbsent(year, this::openWriter);
+        private void write(JsonNode node) throws IOException {
             writer.write(objectMapper.writeValueAsString(node));
             writer.newLine();
         }
 
-        private BufferedWriter openWriter(int year) {
-            Path shard = yearsDir.resolve(String.format("upload_%04d.jsonl", Math.max(0, year)));
-            try {
-                return Files.newBufferedWriter(
-                        shard,
-                        StandardCharsets.UTF_8,
-                        StandardOpenOption.CREATE,
-                        StandardOpenOption.APPEND,
-                        StandardOpenOption.WRITE);
-            } catch (IOException exception) {
-                throw new UncheckedIOException("Failed to open upload shard: " + shard, exception);
-            }
-        }
-
         @Override
         public void close() throws IOException {
-            IOException failure = null;
-            for (BufferedWriter writer : writers.values()) {
-                try {
-                    writer.close();
-                } catch (IOException exception) {
-                    if (failure == null) {
-                        failure = exception;
-                    } else {
-                        failure.addSuppressed(exception);
-                    }
-                }
-            }
-            if (failure != null) {
-                throw failure;
-            }
+            writer.close();
         }
     }
 

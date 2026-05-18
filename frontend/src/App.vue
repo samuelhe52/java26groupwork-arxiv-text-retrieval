@@ -22,6 +22,23 @@
         <p class="status-line subtle">
           {{ buildStatusText }}
         </p>
+        <div v-if="activeBuildProgress" class="build-progress-card">
+          <div class="build-progress-head">
+            <span>{{ progressStageLabel }}</span>
+            <span>{{ activeBuildProgress.percent }}%</span>
+          </div>
+          <div class="progress-bar progress-bar-hero" aria-hidden="true">
+            <div
+              class="progress-bar-fill"
+              :style="{ width: `${Math.max(activeBuildProgress.percent, 4)}%` }"
+            ></div>
+          </div>
+          <p>{{ activeBuildProgress.message }}</p>
+          <span>
+            Step {{ activeBuildProgress.currentStep }} of {{ activeBuildProgress.totalSteps }} /
+            {{ formatDuration(activeBuildProgress.elapsedMillis) }}
+          </span>
+        </div>
         <button class="ghost-button" :disabled="analysisPending || uploadPending" @click="runAnalysis">
           {{ analysisPending ? 'Analyzing...' : analysisButtonText }}
         </button>
@@ -418,6 +435,26 @@ const activeDatasetName = computed(() => {
 
 const analysisReady = computed(() => overview.value?.ready ?? false);
 
+const activeBuildProgress = computed(
+  () => overview.value?.build?.progress ?? health.value?.corpus?.build?.progress ?? null,
+);
+
+const progressStageLabel = computed(() => {
+  const stage = activeBuildProgress.value?.stage;
+  const labels = {
+    queued: 'Queued',
+    starting: 'Starting',
+    connect: 'Connecting',
+    'stage-input': 'Staging input',
+    'term-statistics': 'Term statistics',
+    'scored-terms': 'TF-IDF and index',
+    'document-keywords': 'Document keywords',
+    snapshot: 'Loading snapshot',
+    complete: 'Complete',
+  };
+  return labels[stage] ?? stage ?? 'Running';
+});
+
 const statusBadgeText = computed(() => {
   const status = overview.value?.build?.status;
   if (overview.value?.ready) {
@@ -457,7 +494,8 @@ const buildStatusText = computed(() => {
     return `No analysis has run yet for "${activeDatasetName.value}". Submit analysis to build the search index.`;
   }
   if (build.status === 'reloading') {
-    return `Background analysis is running for "${activeDatasetName.value}".`;
+    return activeBuildProgress.value?.message
+      ?? `Background analysis is running for "${activeDatasetName.value}".`;
   }
   if (build.status === 'reload-failed') {
     return build.warnings?.at(-1) ?? 'The last background reload failed.';
@@ -535,6 +573,16 @@ const summaryCards = computed(() => {
 
 function formatNumber(value) {
   return new Intl.NumberFormat('en-US').format(value ?? 0);
+}
+
+function formatDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.round((milliseconds ?? 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}s elapsed`;
+  }
+  return `${minutes}m ${seconds.toString().padStart(2, '0')}s elapsed`;
 }
 
 function datasetNameFromPath(datasetPath) {

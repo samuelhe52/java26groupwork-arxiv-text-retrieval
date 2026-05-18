@@ -22,6 +22,10 @@ public final class TermStatisticsJob {
     public static final String TERM_FREQUENCY_DIRECTORY_NAME = "tf";
     public static final String DOCUMENT_FREQUENCY_DIRECTORY_NAME = "df";
 
+    public enum Counters {
+        DOCUMENTS
+    }
+
     private static final String TERM_FREQUENCY_OUTPUT_NAME = "termFrequency";
     private static final String DOCUMENT_FREQUENCY_OUTPUT_NAME = "documentFrequency";
     private static final String TERM_FREQUENCY_BASE_OUTPUT_PATH = TERM_FREQUENCY_DIRECTORY_NAME + "/part";
@@ -60,6 +64,7 @@ public final class TermStatisticsJob {
             if (document.documentId().isBlank()) {
                 return;
             }
+            context.getCounter(Counters.DOCUMENTS).increment(1);
 
             Map<String, Integer> termCounts = new HashMap<>();
             for (String token : document.tokens()) {

@@ -11,6 +11,7 @@ public final class HadoopConnectionDescription {
     private final String configDir;
     private final int reducerTasks;
     private final String jobJar;
+    private final int replicationFactor;
 
     public HadoopConnectionDescription(
             String mode,
@@ -21,7 +22,8 @@ public final class HadoopConnectionDescription {
             String outputPath,
             String configDir,
             int reducerTasks,
-            String jobJar) {
+            String jobJar,
+            int replicationFactor) {
         this.mode = mode;
         this.fsDefaultFs = fsDefaultFs;
         this.nameservice = nameservice;
@@ -31,6 +33,7 @@ public final class HadoopConnectionDescription {
         this.configDir = configDir;
         this.reducerTasks = reducerTasks;
         this.jobJar = jobJar;
+        this.replicationFactor = replicationFactor;
     }
 
     public String getMode() {
@@ -67,5 +70,9 @@ public final class HadoopConnectionDescription {
 
     public String getJobJar() {
         return jobJar;
+    }
+
+    public int getReplicationFactor() {
+        return replicationFactor;
     }
 }

@@ -58,6 +58,8 @@ class HadoopConfigTest {
         assertThat(configuration.get("dfs.nameservices")).isEqualTo("orbha");
         assertThat(configuration.get("mapreduce.framework.name")).isEqualTo("yarn");
         assertThat(configuration.get("yarn.resourcemanager.cluster-id")).isEqualTo("orb-yarn");
+        assertThat(configuration.getInt("dfs.replication", 0)).isEqualTo(1);
+        assertThat(configuration.getInt("mapreduce.client.submit.file.replication", 0)).isEqualTo(1);
         assertThat(configuration.getClass("fs.AbstractFileSystem.hdfs.impl", null)).isNotNull();
     }
 

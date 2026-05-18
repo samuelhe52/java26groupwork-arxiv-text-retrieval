@@ -124,6 +124,38 @@ button {
   color: rgba(255, 248, 238, 0.72);
 }
 
+.build-progress-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 248, 238, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 248, 238, 0.1);
+}
+
+.build-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+  color: #fff8ee;
+}
+
+.build-progress-card p,
+.build-progress-card span {
+  margin: 0;
+}
+
+.build-progress-card p {
+  color: rgba(255, 248, 238, 0.84);
+  line-height: 1.5;
+}
+
+.build-progress-card > span {
+  color: rgba(255, 248, 238, 0.64);
+  font-size: 0.88rem;
+}
+
 .dataset-summary {
   display: grid;
   gap: 6px;
@@ -592,6 +624,10 @@ button {
   border-radius: 999px;
   background: rgba(31, 30, 26, 0.08);
   overflow: hidden;
+}
+
+.progress-bar-hero {
+  background: rgba(255, 248, 238, 0.16);
 }
 
 .progress-bar-fill {

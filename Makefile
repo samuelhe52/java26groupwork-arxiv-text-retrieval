@@ -19,7 +19,7 @@ backend-test:
 	$(MAKE) -C $(BACKEND_DIR) test
 
 backend-run-cluster:
-	cd $(BACKEND_DIR) && HADOOP_CONF_DIR=$${HADOOP_CONF_DIR:?set HADOOP_CONF_DIR to your Hadoop conf dir} ./mvnw -q spring-boot:run -Dspring-boot.run.profiles=cluster
+	$(MAKE) -C $(BACKEND_DIR) run-cluster
 
 frontend-install:
 	$(MAKE) -C $(FRONTEND_DIR) install

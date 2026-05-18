@@ -77,6 +77,7 @@ public final class CorpusResponses {
         private final int indexedTermCount;
         private final long indexedPostingCount;
         private final List<String> warnings;
+        private final CorpusBuildProgress progress;
 
         public CorpusBuildSummary(
                 String status,
@@ -88,6 +89,30 @@ public final class CorpusResponses {
                 int indexedTermCount,
                 long indexedPostingCount,
                 List<String> warnings) {
+            this(
+                    status,
+                    datasetDir,
+                    builtAt,
+                    buildMillis,
+                    recordCount,
+                    vocabularySize,
+                    indexedTermCount,
+                    indexedPostingCount,
+                    warnings,
+                    null);
+        }
+
+        public CorpusBuildSummary(
+                String status,
+                String datasetDir,
+                Instant builtAt,
+                long buildMillis,
+                long recordCount,
+                int vocabularySize,
+                int indexedTermCount,
+                long indexedPostingCount,
+                List<String> warnings,
+                CorpusBuildProgress progress) {
             this.status = status;
             this.datasetDir = datasetDir;
             this.builtAt = builtAt;
@@ -97,6 +122,7 @@ public final class CorpusResponses {
             this.indexedTermCount = indexedTermCount;
             this.indexedPostingCount = indexedPostingCount;
             this.warnings = warnings;
+            this.progress = progress;
         }
 
         public String getStatus() {
@@ -133,6 +159,65 @@ public final class CorpusResponses {
 
         public List<String> getWarnings() {
             return warnings;
+        }
+
+        public CorpusBuildProgress getProgress() {
+            return progress;
+        }
+    }
+
+    public static final class CorpusBuildProgress {
+        private final String stage;
+        private final String message;
+        private final int currentStep;
+        private final int totalSteps;
+        private final int percent;
+        private final long elapsedMillis;
+        private final Instant updatedAt;
+
+        public CorpusBuildProgress(
+                String stage,
+                String message,
+                int currentStep,
+                int totalSteps,
+                int percent,
+                long elapsedMillis,
+                Instant updatedAt) {
+            this.stage = stage;
+            this.message = message;
+            this.currentStep = currentStep;
+            this.totalSteps = totalSteps;
+            this.percent = percent;
+            this.elapsedMillis = elapsedMillis;
+            this.updatedAt = updatedAt;
+        }
+
+        public String getStage() {
+            return stage;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        public int getCurrentStep() {
+            return currentStep;
+        }
+
+        public int getTotalSteps() {
+            return totalSteps;
+        }
+
+        public int getPercent() {
+            return percent;
+        }
+
+        public long getElapsedMillis() {
+            return elapsedMillis;
+        }
+
+        public Instant getUpdatedAt() {
+            return updatedAt;
         }
     }
 
