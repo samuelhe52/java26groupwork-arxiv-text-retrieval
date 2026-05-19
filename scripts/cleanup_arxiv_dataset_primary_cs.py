@@ -21,6 +21,7 @@ TARGET_DIR = Path(
 )
 SOURCE_YEARS_DIR = SOURCE_DIR / "years"
 TARGET_YEARS_DIR = TARGET_DIR / "years"
+MERGED_DATASET_PATH = TARGET_DIR / "upload.jsonl"
 PRIMARY_CS_RE = re.compile(r"^cs\.[A-Z]{2}$")
 
 
@@ -42,6 +43,7 @@ def main() -> int:
 
     stats = defaultdict(lambda: {"records": 0, "bytes": 0})
     handles: dict[int, object] = {}
+    merged_handle = MERGED_DATASET_PATH.open("w", encoding="utf-8")
     total_records = 0
     total_bytes = 0
 
@@ -62,12 +64,14 @@ def main() -> int:
 
                     handle = open_writer(year, handles)
                     handle.write(encoded)
+                    merged_handle.write(encoded)
 
                     stats[year]["records"] += 1
                     stats[year]["bytes"] += len(encoded_bytes)
                     total_records += 1
                     total_bytes += len(encoded_bytes)
     finally:
+        merged_handle.close()
         for handle in handles.values():
             handle.close()
 
@@ -94,6 +98,7 @@ def main() -> int:
         "totals": {
             "records": total_records,
             "bytes": total_bytes,
+            "shards": 1,
         },
         "created_at": datetime.now().astimezone().isoformat(),
     }
@@ -113,6 +118,7 @@ Filter:
 - original `cs.LG` inclusion filter is preserved from the source dataset
 
 Layout:
+- dataset root contains backend-ready merged JSONL: `upload.jsonl`
 - `years/` contains one JSONL file per year
 - `manifest.json` lists counts and fields
 

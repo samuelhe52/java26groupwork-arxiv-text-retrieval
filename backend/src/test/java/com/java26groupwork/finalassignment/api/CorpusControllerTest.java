@@ -166,6 +166,56 @@ class CorpusControllerTest {
     }
 
     @Test
+    void localAnalysisPrefersRootCanonicalShardOverYearsDirectory() throws Exception {
+        Path datasetDir = tempDir.resolve("dataset");
+        Files.createDirectories(datasetDir.resolve("years"));
+        Files.writeString(
+                datasetDir.resolve("upload.jsonl"),
+                """
+                {"id":"2604.00001","title":"Root Canonical Paper","abstract":"root merged shard wins","year":2026,"categories":"cs.LG","primary_category":"cs.LG"}
+                """,
+                java.nio.charset.StandardCharsets.UTF_8);
+        Files.writeString(
+                datasetDir.resolve("years").resolve("sample_2025.jsonl"),
+                """
+                {"id":"2501.00001","title":"Year Shard Paper","abstract":"should be ignored when root shard exists","year":2025,"categories":"cs.LG","primary_category":"cs.LG"}
+                """,
+                java.nio.charset.StandardCharsets.UTF_8);
+        Files.writeString(
+                datasetDir.resolve("manifest.json"),
+                """
+                {
+                  "totals": {
+                    "records": 1,
+                    "shards": 1
+                  }
+                }
+                """,
+                java.nio.charset.StandardCharsets.UTF_8);
+
+        CorpusProperties properties = new CorpusProperties();
+        properties.setIndexMaxDocumentFrequencyRatio(1.0);
+        ObjectMapper objectMapper = new ObjectMapper();
+        HadoopProcessingService processingService = org.mockito.Mockito.mock(HadoopProcessingService.class);
+        org.mockito.Mockito.when(processingService.configuredDatasetDir()).thenReturn(datasetDir);
+        org.mockito.Mockito.when(processingService.isLocalMode()).thenReturn(true);
+
+        CorpusIndexService freshService = new CorpusIndexService(properties, objectMapper, processingService);
+        try {
+            freshService.requestReload();
+            waitForServiceBuildStatus(freshService, "ready", Duration.ofSeconds(2));
+
+            org.assertj.core.api.Assertions.assertThat(freshService.documentCount()).isEqualTo(1);
+            var search = freshService.search("merged", null, null, 10);
+            org.assertj.core.api.Assertions.assertThat(search.getTotalHits()).isEqualTo(1);
+            org.assertj.core.api.Assertions.assertThat(search.getResults()).hasSize(1);
+            org.assertj.core.api.Assertions.assertThat(search.getResults().get(0).getId()).isEqualTo("2604.00001");
+        } finally {
+            freshService.destroy();
+        }
+    }
+
+    @Test
     void uploadEndpointAcceptsJsonDatasetFiles() throws Exception {
         String uploadPayload = """
                 {
@@ -333,6 +383,18 @@ class CorpusControllerTest {
         mockMvc.perform(get("/api/overview"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("\"status\":\"" + expectedStatus + "\"")));
+    }
+
+    private void waitForServiceBuildStatus(CorpusIndexService service, String expectedStatus, Duration timeout)
+            throws Exception {
+        long deadlineNanos = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadlineNanos) {
+            if (expectedStatus.equals(service.buildSummary().getStatus())) {
+                return;
+            }
+            Thread.sleep(25L);
+        }
+        org.assertj.core.api.Assertions.assertThat(service.buildSummary().getStatus()).isEqualTo(expectedStatus);
     }
 
     private void stageAndAnalyzeSampleCorpus() throws Exception {

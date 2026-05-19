@@ -154,7 +154,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset-dir",
         type=Path,
         default=DEFAULT_DATASET_DIR,
-        help="Dataset directory containing manifest.json and a years/ shard directory.",
+        help="Dataset directory containing manifest.json plus a merged .jsonl file or a years/ shard directory.",
     )
     parser.add_argument(
         "--output",
@@ -210,13 +210,22 @@ def load_manifest(dataset_dir: Path) -> dict:
 
 
 def iter_records(dataset_dir: Path):
-    years_dir = dataset_dir / "years"
-    for shard_path in sorted(years_dir.glob("*.jsonl")):
+    shard_paths = list_dataset_shards(dataset_dir)
+    for shard_path in shard_paths:
         with shard_path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, start=1):
                 if not line.strip():
                     continue
                 yield shard_path, line_no, json.loads(line)
+
+
+def list_dataset_shards(dataset_dir: Path) -> list[Path]:
+    root_shards = sorted(path for path in dataset_dir.glob("*.jsonl") if path.is_file())
+    if root_shards:
+        return root_shards
+
+    years_dir = dataset_dir / "years"
+    return sorted(path for path in years_dir.glob("*.jsonl") if path.is_file())
 
 
 def percentile(values: list[int], pct: float) -> float:
@@ -358,7 +367,7 @@ def main() -> int:
         }
     )
 
-    for shard_path in sorted((dataset_dir / "years").glob("*.jsonl")):
+    for shard_path in list_dataset_shards(dataset_dir):
         with shard_path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, start=1):
                 if not line.strip():
@@ -460,7 +469,7 @@ def main() -> int:
         if doc_count
         else 0.0
     )
-    shard_count = len(list((dataset_dir / "years").glob("*.jsonl")))
+    shard_count = len(list_dataset_shards(dataset_dir))
     year_keywords = score_year_keywords(
         year_term_frequency=year_term_frequency,
         year_token_totals=year_token_totals,

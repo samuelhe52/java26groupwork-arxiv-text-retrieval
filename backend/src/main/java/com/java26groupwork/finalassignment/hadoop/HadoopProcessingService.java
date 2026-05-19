@@ -276,12 +276,12 @@ public class HadoopProcessingService {
 
     private StageResult stageDataset(
             Path sourceDatasetDir, FileSystem fileSystem, org.apache.hadoop.fs.Path inputDirectory) throws IOException {
+        if (Files.isDirectory(sourceDatasetDir) && containsJsonlShards(sourceDatasetDir)) {
+            return stageLocalDataset(sourceDatasetDir, fileSystem, inputDirectory);
+        }
         Path yearsDir = sourceDatasetDir.resolve("years");
         if (Files.isDirectory(yearsDir)) {
             return stageLocalDataset(yearsDir, fileSystem, inputDirectory);
-        }
-        if (Files.isDirectory(sourceDatasetDir) && containsJsonlShards(sourceDatasetDir)) {
-            return stageLocalDataset(sourceDatasetDir, fileSystem, inputDirectory);
         }
         if (properties.getMode() == HadoopProperties.Mode.CLUSTER) {
             return stageClusterDataset(fileSystem, inputDirectory);

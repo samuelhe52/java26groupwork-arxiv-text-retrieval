@@ -613,11 +613,23 @@ public class CorpusIndexService {
 
     private List<Path> datasetShardPaths(Path datasetDir) throws IOException {
         Path yearsDir = datasetDir.resolve("years");
-        Path shardDirectory = Files.isDirectory(yearsDir) ? yearsDir : datasetDir;
+        Path shardDirectory = datasetDir;
         if (!Files.isDirectory(shardDirectory)) {
             throw new IllegalArgumentException("Dataset years directory does not exist: " + yearsDir);
         }
+        List<Path> rootShards;
         try (var stream = Files.list(shardDirectory)) {
+            rootShards = stream.filter(path -> path.getFileName().toString().endsWith(".jsonl"))
+                    .sorted()
+                    .toList();
+        }
+        if (!rootShards.isEmpty()) {
+            return rootShards;
+        }
+        if (!Files.isDirectory(yearsDir)) {
+            throw new IllegalArgumentException("Dataset years directory does not exist: " + yearsDir);
+        }
+        try (var stream = Files.list(yearsDir)) {
             return stream.filter(path -> path.getFileName().toString().endsWith(".jsonl"))
                     .sorted()
                     .toList();

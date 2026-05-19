@@ -21,6 +21,7 @@ WORK_DIR = Path(
 )
 RAW_DIR = WORK_DIR / "raw"
 OUTPUT_DIR = BASE_DIR / "years"
+MERGED_DATASET_PATH = BASE_DIR / "upload.jsonl"
 SOURCE_REPO = "jackkuo/arXiv-metadata-oai-snapshot"
 SOURCE_FILE = "arxiv-metadata-oai-snapshot.json"
 START_YEAR = 2015
@@ -121,6 +122,7 @@ def assemble(snapshot_path: Path) -> dict:
 
     stats = defaultdict(lambda: {"records": 0, "bytes": 0})
     year_handles: dict[int, object] = {}
+    merged_handle = MERGED_DATASET_PATH.open("w", encoding="utf-8")
     total_records = 0
     total_bytes = 0
     max_year_seen = 0
@@ -170,6 +172,7 @@ def assemble(snapshot_path: Path) -> dict:
 
                 handle = open_writer(year, year_handles)
                 handle.write(encoded)
+                merged_handle.write(encoded)
 
                 stats[year]["records"] += 1
                 stats[year]["bytes"] += len(encoded_bytes)
@@ -180,6 +183,7 @@ def assemble(snapshot_path: Path) -> dict:
                 if total_records % 50000 == 0:
                     log(f"filtered {total_records} records so far; latest year={year}")
     finally:
+        merged_handle.close()
         for handle in year_handles.values():
             handle.close()
 
@@ -228,6 +232,7 @@ def assemble(snapshot_path: Path) -> dict:
         "totals": {
             "records": total_records,
             "bytes": total_bytes,
+            "shards": 1,
         },
         "created_at": datetime.now().astimezone().isoformat(),
     }
@@ -249,6 +254,7 @@ Filter:
 - year is derived from the arXiv ID prefix (`YYMM`)
 
 Layout:
+- dataset root contains backend-ready merged JSONL: `upload.jsonl`
 - `years/` contains one JSONL file per year
 - `manifest.json` lists counts and fields
 

@@ -111,8 +111,8 @@ make backend-run-cluster
 
 ## Current Data Preparation Scripts
 
-- `scripts/assemble_arxiv_snapshot_dataset.py`: builds a local arXiv `cs.LG` dataset organized by year
-- `scripts/cleanup_arxiv_dataset_primary_cs.py`: derives a stricter primary-`cs.*` subset from the assembled dataset
+- `scripts/assemble_arxiv_snapshot_dataset.py`: builds a local arXiv `cs.LG` dataset with a backend-ready merged `upload.jsonl` plus optional yearly shards
+- `scripts/cleanup_arxiv_dataset_primary_cs.py`: derives a stricter primary-`cs.*` subset and writes the backend-ready merged `upload.jsonl`
 - `scripts/preflight_arxiv_dataset.py`: runs Python-only corpus checks, yearly keywords since 2019, and TF-IDF smoke tests before any Java or Hadoop work
 
 ## Common Commands
