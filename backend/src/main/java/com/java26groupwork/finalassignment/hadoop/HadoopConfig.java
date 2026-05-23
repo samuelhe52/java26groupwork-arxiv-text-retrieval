@@ -2,6 +2,8 @@ package com.java26groupwork.finalassignment.hadoop;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -9,6 +11,8 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 @EnableConfigurationProperties(HadoopProperties.class)
 public class HadoopConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(HadoopConfig.class);
 
     @Bean
     public org.apache.hadoop.conf.Configuration hadoopConfiguration(HadoopProperties properties) {
@@ -34,6 +38,11 @@ public class HadoopConfig {
         configuration.setInt(
                 "mapreduce.client.submit.file.replication",
                 Math.max(1, properties.getReplicationFactor()));
+
+        log.info(
+                "cluster mode enabled: hdfsAddress={} hadoopConfDir={}",
+                configuration.getTrimmed("fs.defaultFS", "unknown"),
+                configDir);
 
         return configuration;
     }
