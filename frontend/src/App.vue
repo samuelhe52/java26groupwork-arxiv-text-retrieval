@@ -2,7 +2,7 @@
   <main class="page-shell">
     <section class="hero-panel">
       <div class="hero-copy">
-        <p class="eyebrow">Hadoop Text Retrieval</p>
+        <p class="eyebrow">{{ heroEyebrow }}</p>
         <h1>Search arXiv abstracts through a Hadoop-powered TF-IDF pipeline.</h1>
       </div>
 
@@ -39,7 +39,12 @@
             {{ formatDuration(activeBuildProgress.elapsedMillis) }}
           </span>
         </div>
-        <button class="ghost-button" :disabled="analysisPending || uploadPending" @click="runAnalysis">
+        <button
+          v-if="!isPrebuiltDemo"
+          class="ghost-button"
+          :disabled="analysisPending || uploadPending"
+          @click="runAnalysis"
+        >
           {{ analysisPending ? 'Analyzing...' : analysisButtonText }}
         </button>
       </div>
@@ -47,15 +52,15 @@
 
     <section class="search-panel">
       <div class="search-heading">
-        <p class="section-label">Dataset Setup</p>
-        <h2>Use the default corpus or upload your own</h2>
+        <p class="section-label">{{ isPrebuiltDemo ? 'Demo Snapshot' : 'Dataset Setup' }}</p>
+        <h2>{{ isPrebuiltDemo ? 'Read-only prebuilt cluster demo' : 'Use the default corpus or upload your own' }}</h2>
       </div>
 
       <div v-if="uiError" class="error-strip">
         {{ uiError }}
       </div>
 
-      <div class="upload-panel">
+      <div v-if="!isPrebuiltDemo" class="upload-panel">
         <div class="upload-copy">
           <p class="section-label">Dataset Import</p>
           <p class="upload-hint">
@@ -122,7 +127,20 @@
         </div>
       </div>
 
-      <p v-if="!analysisReady" class="setup-note">
+      <div v-else class="upload-panel">
+        <div class="upload-copy">
+          <p class="section-label">Prebuilt Mode</p>
+          <p class="upload-hint">
+            This route loads a saved full-dataset snapshot from disk and presents it as a completed
+            cluster-mode analysis. It does not launch Hadoop or rebuild the index at request time.
+          </p>
+          <p class="upload-meta dataset-meta">
+            Snapshot path: {{ prebuiltSnapshotPath }}
+          </p>
+        </div>
+      </div>
+
+      <p v-if="!analysisReady && !isPrebuiltDemo" class="setup-note">
         {{ setupGuidanceText }}
       </p>
 
@@ -383,6 +401,9 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 
+const normalizedPath = window.location.pathname.replace(/\/+$/, '') || '/';
+const isPrebuiltDemo = normalizedPath === '/prebuilt';
+
 const query = ref('');
 const selectedYear = ref('');
 const selectedCategory = ref('');
@@ -405,6 +426,14 @@ const selectedUploadFiles = ref([]);
 const uploadResult = ref('');
 const uploadWarnings = ref([]);
 let analysisPollRun = 0;
+
+const heroEyebrow = computed(() =>
+  isPrebuiltDemo ? 'Hadoop Text Retrieval / Prebuilt Cluster Demo' : 'Hadoop Text Retrieval',
+);
+
+const prebuiltSnapshotPath = computed(
+  () => health.value?.hadoop?.configDir || '../datasets/prebuilt-cluster-demo/snapshot.json',
+);
 
 const yearOptions = computed(() =>
   (overview.value?.years ?? []).map((entry) => entry.year).sort((left, right) => right - left),
@@ -479,6 +508,9 @@ const healthText = computed(() => {
   }
   const corpus = health.value.corpus;
   const buildMillis = corpus?.build?.buildMillis ?? 0;
+  if (isPrebuiltDemo) {
+    return `Backend ${health.value.status}; serving a prebuilt cluster snapshot for ${activeDatasetName.value}; displayed build ${buildMillis} ms.`;
+  }
   return `Backend ${health.value.status}; corpus ${corpus?.ready ? 'online' : 'not ready'}; active dataset ${activeDatasetName.value}; last completed build ${buildMillis} ms.`;
 });
 
@@ -486,6 +518,9 @@ const buildStatusText = computed(() => {
   const build = overview.value?.build;
   if (!build) {
     return 'Corpus build metadata is loading.';
+  }
+  if (isPrebuiltDemo) {
+    return `Dataset "${activeDatasetName.value}" is served from the saved prebuilt snapshot in cluster mode.`;
   }
   if (build.status === 'staged') {
     return `Dataset "${activeDatasetName.value}" is staged. Submit analysis to build the search index.`;
@@ -620,10 +655,16 @@ async function resetResultsScroller() {
 }
 
 const apiBase = (import.meta.env.VITE_API_BASE?.trim() ?? '').replace(/\/$/, '');
+const apiPrefix = isPrebuiltDemo ? '/api/prebuilt' : '/api';
 
 function apiUrl(path) {
   const normalized = path.startsWith('/') ? path : `/${path}`;
   return apiBase ? `${apiBase}${normalized}` : normalized;
+}
+
+function corpusApiPath(path) {
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return `${apiPrefix}${normalized}`;
 }
 
 async function apiFetch(path, options = {}) {
@@ -658,8 +699,8 @@ async function apiFetch(path, options = {}) {
 async function loadDashboard({ throwOnError = false } = {}) {
   try {
     const [healthData, overviewData] = await Promise.all([
-      apiFetch('/api/health'),
-      apiFetch('/api/overview'),
+      apiFetch(corpusApiPath('/health')),
+      apiFetch(corpusApiPath('/overview')),
     ]);
     health.value = healthData;
     overview.value = overviewData;
@@ -732,7 +773,7 @@ async function runSearch() {
     if (selectedCategory.value) {
       params.set('category', selectedCategory.value);
     }
-    const response = await apiFetch(`/api/search?${params.toString()}`);
+    const response = await apiFetch(`${corpusApiPath('/search')}?${params.toString()}`);
     searchResponse.value = response;
     await resetResultsScroller();
     if (response.results?.length) {
@@ -749,7 +790,7 @@ async function loadDocument(documentId) {
   detailPending.value = true;
   try {
     uiError.value = '';
-    selectedDocument.value = await apiFetch(`/api/documents/${documentId}`);
+    selectedDocument.value = await apiFetch(`${corpusApiPath(`/documents/${documentId}`)}`);
   } catch (error) {
     uiError.value = error instanceof Error ? error.message : 'Failed to load document detail.';
   } finally {

@@ -18,6 +18,8 @@ app:
     search-default-limit: 20
     search-max-limit: 50
     index-max-document-frequency-ratio: 0.20
+  demo:
+    prebuilt-snapshot-path: ../datasets/prebuilt-cluster-demo/snapshot.json
   hadoop:
     mode: local
     config-dir: ${HADOOP_CONF_DIR:${HADOOP_HOME:${user.home}/hadoop}/etc/hadoop}
